@@ -113,7 +113,7 @@ if __name__ == "__main__":
         }
 
         # 3. Create a safe directory and dynamic filename
-        save_dir = 'models/saved_streams'
+        save_dir = 'testing/models/'
         os.makedirs(save_dir, exist_ok=True) # Prevents crashes if folder doesn't exist
         
         timestamp = time.strftime("%Y%m%d-%H%M%S")
