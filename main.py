@@ -3,6 +3,7 @@ import queue
 import glob
 import time
 import torch
+import os
 from data_fetcher import producer, fetch_init_data, DataProduct
 from otfp import MFA_OTFP
 
@@ -88,3 +89,36 @@ if __name__ == "__main__":
         if PERFORM_TIMING:
             print(f"Total processing time: {time.perf_counter() - start_time:.2f} seconds")
             print("Timing: ")
+                
+        # 1. Extract dynamic parameters directly from the trained model
+        final_K = MFA_OTFP_model.MFA.K
+        final_q = MFA_OTFP_model.MFA.q
+
+        # 2. Build the state dictionary
+        mfa_state = {
+            'model_state_dict': MFA_OTFP_model.MFA.state_dict(), 
+            
+            # Hyperparameters required to initialize the MFA class
+            'hyperparameters': {
+                'n_components': final_K,
+                'n_features': NUM_CHANNELS,
+                'n_factors': final_q
+            },
+            
+            # Streaming state required to resume the OTFP class later
+            'streaming_state': {
+                'll_threshold': getattr(MFA_OTFP_model, 'll_threshold', None),
+                'n_samples_seen': MFA_OTFP_model.n_samples_seen
+            }
+        }
+
+        # 3. Create a safe directory and dynamic filename
+        save_dir = 'models/saved_streams'
+        os.makedirs(save_dir, exist_ok=True) # Prevents crashes if folder doesn't exist
+        
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        save_path = f'{save_dir}/mfa_K{final_K}_q{final_q}_{timestamp}.pt'
+        
+        # 4. Save to disk
+        torch.save(mfa_state, save_path)
+        print(f"\n MFA model successfully saved to '{save_path}'")
