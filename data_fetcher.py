@@ -59,16 +59,17 @@ def fetch_init_data(file_list : list[str], n_target_samples : int, data_product 
     n_target_samples (int): Number of training-samples
     data_product (DataProduct): Enum indicating which data product to read (L1A, L1B, or L1D).
     Return:
-    
+
     """
 
     len_file_list = len(file_list)
     # We read from max 30 files to reduce computation time during development, but this can be adjusted as needed.
     MAX_FILES_TO_READ = 20
-
-    samples_per_file = n_target_samples // min(len_file_list, MAX_FILES_TO_READ)
+    num_files = min(len_file_list, MAX_FILES_TO_READ)
+    file_list = file_list[:num_files] 
+    samples_per_file = n_target_samples // num_files
     sampled_pixels = []
-    print(f"Aiming to extract ~{samples_per_file} pixels per file from {min(len_file_list, MAX_FILES_TO_READ)} files to reach a total of ~{n_target_samples} samples.")
+    print(f"Aiming to extract ~{samples_per_file} pixels per file from {num_files} files to reach a total of ~{n_target_samples} samples.")
     i = 1
 
     product_to_attr = {
@@ -103,7 +104,7 @@ def fetch_init_data(file_list : list[str], n_target_samples : int, data_product 
         # Grab the random pixels and add to list
         sampled_pixel_subset = image_2d[indices, :]
         sampled_pixels.append(sampled_pixel_subset)
-        print(f"{i}/{len_file_list} | File: {file_path} | Extracted {n_to_take} pixels.")
+        print(f"{i}/{num_files} | File: {file_path} | Extracted {n_to_take} pixels.")
         i += 1
 
     data = np.concatenate(sampled_pixels, axis=0)

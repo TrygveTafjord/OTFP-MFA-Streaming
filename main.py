@@ -12,7 +12,7 @@ PERFORM_TIMING = True
 ## MODEL PARAMETERS
 NUM_CHANNELS = 120                          
 OUTLIER_SIGNIFICANCE = 0.01                 
-OUTLIER_UPDATE_TRESHOLD = 1000               
+OUTLIER_UPDATE_TRESHOLD = 3000               
 Q_MAX = 10 
 
 # Data parameters 
@@ -37,6 +37,7 @@ MFA_OTFP_model = MFA_OTFP(
 
 if __name__ == "__main__":
     
+    start_time = 0
     if PERFORM_TIMING:
         start_time = time.perf_counter()
     
@@ -50,13 +51,14 @@ if __name__ == "__main__":
     # Start the producer thread
     producer_thread = threading.Thread(
         target=producer, 
-        args=(IMAGE_PATHS, queue, DATA_PRODUCT, 2000),
+        args=(IMAGE_PATHS, queue, DATA_PRODUCT, 5000),
         daemon=True
     )
     producer_thread.start()
 
     try:
         # Main processing loop
+        n_processed_blocks = 0
         while True:
             
             projection_data = queue.get() 
@@ -69,6 +71,9 @@ if __name__ == "__main__":
             
             # Stream the data block into your MFA model
             MFA_OTFP_model.process_data_block(X=projection_data)
+            n_processed_blocks += 1
+            if n_processed_blocks % 1000 == 0: 
+                print(f"Processed; {n_processed_blocks} blocks of data")
             
     except KeyboardInterrupt:
         print("\nStreaming interrupted by user.")
@@ -81,5 +86,5 @@ if __name__ == "__main__":
         # You can add MFA-specific stats here later, like final K and q!
         
         if PERFORM_TIMING:
-            #print(f"Total processing time: {time.perf_counter() - start_time:.2f} seconds")
+            print(f"Total processing time: {time.perf_counter() - start_time:.2f} seconds")
             print("Timing: ")

@@ -1,9 +1,5 @@
 import torch
-import numpy as np
-import glob
 from mfa import MFA
-from hypso import Hypso
-
 
 class MFA_OTFP:
     def __init__(self, init_data: torch.Tensor, n_channels: int, outlier_significance: float, device: str, outlier_update_treshold: int, L2_normalization: bool = True, q_max: int = 5):
@@ -13,18 +9,25 @@ class MFA_OTFP:
         self.outlier_significance = outlier_significance
         self.L2_normalization = L2_normalization
 
-        # Train Initial Model and perform model selection        
-        data_dir = glob.glob(f'data/training_l1b/*.nc')
-        initil_data = self.fetch_init_data(data_dir= data_dir, target_total_samples= 20000) #Not yet implemented, just a placeholder for fetching initial data for model selection and initial fitting, will probably be implemented as a method in this class later on, or perhaps even as a separate utility-function or perhaps the data will be an input to the constructor, we will see.
         if self.L2_normalization:
-            initil_data = torch.nn.functional.normalize(initil_data, p=2, dim=1)
+            init_data = torch.nn.functional.normalize(init_data, p=2, dim=1)
         
         #start model selection, this will be implemented as a method in this class, but for now it is just a dummy function that returns fixed values for K and q, we will implement the actual model selection logic later on, perhaps using BIC or AIC or some other criterion to select the best K and q based on the initial data.
-        K, q = self.perform_model_selection(data=initil_data, n_channels=n_channels, q_max=q_max)
+        K, q = self.perform_model_selection(data=init_data, n_channels=n_channels, q_max=q_max)
 
         #Fit the model
+        print("Creating initial model")
         self.MFA = MFA(n_components = K, n_channels = n_channels, n_factors=q).to(device)        
-        self.MFA.fit(initil_data) # Fit the initial model on the initial data
+        with torch.no_grad():
+            self.MFA.fit(init_data) # Fit the initial model on the initial data
+        print("initial model created")
+
+        with torch.no_grad():
+            _, init_ll = self.MFA.e_step(init_data)
+        
+        kth_value = max(1, int(outlier_significance * init_data.shape[0]))
+        self.ll_threshold = torch.kthvalue(init_ll, kth_value).values.item()
+        print(f"Calculated Global Outlier Log-Likelihood Threshold: {self.ll_threshold:.2f}")
 
         # Outliers are saved to the shelf, allocate memory
         self.outliers_shelf = torch.empty((self.outlier_update_treshold, n_channels), device=self.device, dtype=torch.float32)
@@ -41,21 +44,20 @@ class MFA_OTFP:
         q = min(q_max, n_channels)  
         return K, q
 
-    
     def process_data_block(self, X):
 
         if self.L2_normalization:
             X = torch.nn.functional.normalize(X, p=2, dim=1)
 
         self.n_samples_seen += X.shape[0]
-
-        log_resp_norm, log_likelihood = self.MFA.e_step(X)
+        with torch.no_grad():
+            log_resp_norm, log_likelihood = self.MFA.e_step(X)
 
         responsibilities = torch.exp(log_resp_norm)
         new_cluster_ids = torch.argmax(responsibilities, dim=1)
 
-        outlier_mask = log_likelihood < self.outlier_significance
-        # Store outliers in the shelf
+        outlier_mask = log_likelihood < self.ll_threshold
+        
         num_new_outliers = outlier_mask.sum().item()
         if num_new_outliers + self.num_outliers_on_shelf > self.outlier_update_treshold:
             # If shelf is full, update the model with outliers
@@ -80,8 +82,12 @@ class MFA_OTFP:
 
         elif num_new_outliers > 0:
             
+            start_idx = self.num_outliers_on_shelf
+            end_idx = start_idx + num_new_outliers
+            
+            self.outliers_shelf[start_idx : end_idx] = X[outlier_mask]
+            
             self.num_outliers_on_shelf += num_new_outliers
-            self.outliers_shelf[self.num_outliers_on_shelf: self.num_outliers_on_shelf + num_new_outliers] = X[outlier_mask]
 
         # Check what clusters each well-explained pixel belongs to
         
