@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import math
 
 class MFA(nn.Module):
     def __init__(self, n_components, n_channels, n_factors, tol=1e-4, max_iter=150, device='cpu'):
@@ -178,7 +177,7 @@ class MFA(nn.Module):
             self.K += 1
             print(f"Model successfully updated! Total components (K) is now {self.K}")
     
-    
+
     def update_single_component(self, k, X_update, alpha=0.5):
         """
         Performs an Online M-Step update for a single Factor Analyzer.

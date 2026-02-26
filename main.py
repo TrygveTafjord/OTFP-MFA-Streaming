@@ -116,8 +116,7 @@ if __name__ == "__main__":
         save_dir = 'testing/models/'
         os.makedirs(save_dir, exist_ok=True) # Prevents crashes if folder doesn't exist
         
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
-        save_path = f'{save_dir}/mfa_K{final_K}_q{final_q}_{timestamp}.pt'
+        save_path = f'{save_dir}/otfp_mfa.pt'
         
         # 4. Save to disk
         torch.save(mfa_state, save_path)

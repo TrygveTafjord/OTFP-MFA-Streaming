@@ -2,7 +2,12 @@ import torch
 import torch.nn.functional as F
 from hypso import Hypso
 import numpy as np
+from enum import Enum
 
+class DataProduct(Enum):
+    L1A = 'l1a'
+    L1B = 'l1b'
+    L1D = 'l1d'
 
 def calculate_rmse(original, reconstructed):
     """Calculates Root Mean Squared Error."""
@@ -38,30 +43,31 @@ def get_data(data_dir, data_product, target_total_samples):
     sampled_data_list = []
 
     print(f"Aiming to extract ~{samples_per_file} pixels per file from {len_data_dir} files to reach a total of ~{target_total_samples} samples.")
-
+    product_to_attr = {
+    DataProduct.L1A: "l1a_cube",
+    DataProduct.L1B: "l1b_cube",
+    DataProduct.L1D: "l1d_cube"
+    }
+    cube_attr_name = product_to_attr.get(data_product)
+    if not cube_attr_name:
+        raise ValueError(f"Unknown data product: {data_product}")
     i = 1
-    for file in data_dir:
+    for file_path in data_dir:
         # Load Data
         try:
-            satobj = Hypso(file) 
-            if satobj is None: continue
 
-            # Load and reshape
-            match data_product:
-                case 'l1a':
-                    data = satobj.l1a_cube.values.astype(np.float32)
-                case 'l1b':
-                    data = satobj.l1b_cube.values.astype(np.float32)
-                case 'l1d':
-                    data = satobj.l1d_cube.values.astype(np.float32)
-                case _:
-                    raise ValueError(f"Unknown data product: {data_product}")
-
-            h, w, b = data.shape
-            data_2d = data.reshape(-1, b) # Shape: (Total_Pixels_In_Image, 120)
+            satobj = Hypso(file_path)
+            cube = getattr(satobj, cube_attr_name, None)
+            if cube is None:
+                print(f"Skipping {file_path}: Missing {cube_attr_name} data.")
+                continue
+                
+            pixels = cube.values.astype(np.float32)
+            h, w, b = pixels.shape
+            pixels_2d = pixels.reshape(-1, b) # Shape: (Total_Pixels_In_Image, 120)
 
             # Random Subsampling 
-            total_pixels_in_image = data_2d.shape[0]
+            total_pixels_in_image = pixels_2d.shape[0]
 
             # Determine how many to take (don't take more than exists)
             n_to_take = min(samples_per_file, total_pixels_in_image)
@@ -71,13 +77,13 @@ def get_data(data_dir, data_product, target_total_samples):
             indices = rng.choice(total_pixels_in_image, size=n_to_take, replace=False)
 
             # Grab the random pixels and add to list
-            sampled_pixel_subset = data_2d[indices, :]
+            sampled_pixel_subset = pixels_2d[indices, :]
             sampled_data_list.append(sampled_pixel_subset)
 
-            print(f"{i}/{len_data_dir} | File: {file} | Extracted {n_to_take} pixels.")
+            print(f"{i}/{len_data_dir} | File: {file_path} | Extracted {n_to_take} pixels.")
             i += 1
         except Exception as e:
-            print(f"Error processing {file}: {e}")
+            print(f"Error processing {file_path}: {e}")
         
     data = np.concatenate(sampled_data_list, axis=0)
     #Convert to torch tensor
