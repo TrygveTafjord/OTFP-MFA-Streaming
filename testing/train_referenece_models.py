@@ -49,12 +49,16 @@ print(f"Shape of X: {X.shape}")
 
 mfa_model = MFA(n_components=K, n_channels=X.shape[1], n_factors=q)
 
+print("Initializing MFA")
 mfa_model.initialize_parameters(X)
-# Fit
+print("Training MFA")
+
 start_time = time.perf_counter()
 mfa_model.fit(X)
 end_time = time.perf_counter()
 training_time = start_time - end_time
+print(f"Training time is: {training_time}s")
+
 
 # Clean up memory if using GPU
 if device.type == 'cuda':
@@ -76,13 +80,8 @@ mfa_state = {
     }
     }
 
-# 3. Create a safe directory and dynamic filename
-save_dir = 'models/'
-os.makedirs(save_dir, exist_ok=True) # Prevents crashes if folder doesn't exist
-
-timestamp = time.strftime("%Y%m%d-%H%M%S")
-save_path = f'{save_dir}/reference_mfa_K{K}_q{q}_nsamp{target_total_samples}.pt'
-
+torch.save(mfa_state, f'models/mfa.pt')
+    
 
 
 print(f"Training PCA model")
@@ -133,5 +132,5 @@ pca_state = {
     'n_components_995': n_components_995
 }
 
-torch.save(pca_state, f'models/reference_pca_q{n_components_995}.pt')
-print(f"PCA model saved to 'models/reference_pca_q{data_product}.pt'")
+torch.save(pca_state, f'models/pca.pt')
+print(f"PCA model saved to 'models/pca.pt'")
