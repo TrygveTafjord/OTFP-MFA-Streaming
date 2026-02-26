@@ -90,8 +90,8 @@ class MFA_OTFP:
             eigenvalues = torch.flip(eigenvalues, dims=[0]) # Sort descending
 
             cumulative_variance = torch.cumsum(eigenvalues, dim=0) / torch.sum(eigenvalues)
-            # Find the first index where cumulative variance > 0.99
-            q_new = torch.searchsorted(cumulative_variance, 0.99).item() + 1
+            # Find the first index where cumulative variance > 0.95
+            q_new = torch.searchsorted(cumulative_variance, 0.95).item() + 1
 
             # Bound q to your maximum
             q_new = min(q_new, self.q_max)
@@ -99,7 +99,6 @@ class MFA_OTFP:
             print(f"Adding 1 new component with {q_new} latent factors.")
 
             temp_mfa = MFA(n_components=1, n_channels=self.MFA.D, n_factors=q_new, device=self.device)
-            # Use your K-means initialization to give it a good start
             temp_mfa.initialize_parameters(X_outliers)
             temp_mfa.fit(X_outliers)
 

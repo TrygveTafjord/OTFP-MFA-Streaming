@@ -177,7 +177,6 @@ class MFA(nn.Module):
             self.K += 1
             print(f"Model successfully updated! Total components (K) is now {self.K}")
     
-    
     def update_single_component(self, k, X_update, alpha=0.5):
         """
         Performs an Online M-Step update for a single Factor Analyzer.

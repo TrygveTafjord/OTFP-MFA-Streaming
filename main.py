@@ -1,4 +1,4 @@
-import threading
+import multiprocessing
 import queue
 import glob
 import time
@@ -50,7 +50,7 @@ if __name__ == "__main__":
     queue = queue.Queue(maxsize=200) 
 
     # Start the producer thread
-    producer_thread = threading.Thread(
+    producer_thread = multiprocessing.Process(
         target=producer, 
         args=(IMAGE_PATHS, queue, DATA_PRODUCT, 5000),
         daemon=True
