@@ -128,8 +128,3 @@ def mean_center_data(data):
     
     return centered_data, mean
 
-def l2_normalize_data(data, epsilon=1e-8):
-    """Performs L2 normalization on the data."""
-    norms = torch.norm(data, p=2, dim=1, keepdim=True)
-    normalized_data = data / (norms + epsilon)
-    return normalized_data
