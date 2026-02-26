@@ -20,6 +20,7 @@ class MFA_OTFP:
         print("Creating initial model")
         self.MFA = MFA(n_components = K, n_channels = n_channels, n_factors=q).to(device)        
         with torch.no_grad():
+            self.MFA.initialize_parameters(init_data)
             self.MFA.fit(init_data) # Fit the initial model on the initial data
         print("initial model created")
 
