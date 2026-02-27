@@ -3,55 +3,59 @@ from mfa import MFA
 
 class MFA_OTFP:
     def __init__(self, init_data: torch.Tensor, n_channels: int, outlier_significance: float, device: str, outlier_update_treshold: int, L2_normalization: bool = True, q_max: int = 5):
-        # System Parameters
+        # System hyperparameters
         self.device = device
+        self.n_channels = n_channels
+        self.q_max = q_max
         self.outlier_update_treshold = outlier_update_treshold
         self.outlier_significance = outlier_significance
         self.L2_normalization = L2_normalization
-        self.q_max = q_max
 
-        if self.L2_normalization:
-            init_data = torch.nn.functional.normalize(init_data, p=2, dim=1)
+        # MFA model-state 
+        K, q = self._perform_model_selection(data=init_data, n_channels=n_channels, q_max=q_max)
+        self.MFA = MFA(n_components = K, n_channels = n_channels, n_factors=q).to(self.device)
+        self.ll_threshold = 0.0  # Calibrated after initial fit
+        self._run_mfa_setup(init_data)
         
-        #start model selection, this will be implemented as a method in this class, but for now it is just a dummy function that returns fixed values for K and q, we will implement the actual model selection logic later on, perhaps using BIC or AIC or some other criterion to select the best K and q based on the initial data.
-        K, q = self.perform_model_selection(data=init_data, n_channels=n_channels, q_max=q_max)
-
-        #Fit the model
-        print("Creating initial model")
-        self.MFA = MFA(n_components = K, n_channels = n_channels, n_factors=q).to(device)        
-        with torch.no_grad():
-            self.MFA.initialize_parameters(init_data)
-            self.MFA.fit(init_data) # Fit the initial model on the initial data
-        print("initial model created")
-
-        with torch.no_grad():
-            _, init_ll = self.MFA.e_step(init_data)
-        
-        kth_value = max(1, int(outlier_significance * init_data.shape[0]))
-        self.ll_threshold = torch.kthvalue(init_ll, kth_value).values.item()
-        print(f"Calculated Global Outlier Log-Likelihood Threshold: {self.ll_threshold:.2f}")
-
-        # Outliers are saved to the shelf, allocate memory
-        self.outliers_shelf = torch.empty((self.outlier_update_treshold, n_channels), device=self.device, dtype=torch.float32)
-        self.pixels_assigned_per_component = torch.empty((self.outlier_update_treshold, n_channels), device=self.device, dtype=torch.float32)
-
-        # Dictionary to hold drifting pixels for each specific component
-        self.local_shelves = {k: [] for k in range(self.MFA.K)}
-        self.local_shelf_counts = torch.zeros(self.MFA.K, dtype=torch.long, device=self.device)
-        
-        # Track perfectly explained pixels (Used to update component weights later)
-        self.component_pixel_counts = torch.zeros(self.MFA.K, dtype=torch.long, device=self.device)
-        
-        # System State
+        # Streaming statistics
         self.n_samples_seen = 0
-        self.num_outliers_on_shelf = 0
         self.n_model_updates = 0
         self.blocks_processed = 0
+
+        # Memory buffers
+        # Holds outliers that are not well explained by the model
+        self.global_outliers_shelf = torch.empty((self.outlier_update_treshold, n_channels), device=self.device, dtype=torch.float32) 
+        self.num_outliers_on_shelf = 0
+        
+        # Local shelves for drifting known materials (Components)
+        self.local_shelf_counts = torch.zeros(self.MFA.K, dtype=torch.long, device=self.device) # Tensor tracking size per component     
+        self.component_pixel_counts = torch.zeros(self.MFA.K, dtype=torch.long, device=self.device) # Counter for perfectly explained pixels (for weight re-calibration)
+        
+        # Initialize dictionary for local shelves
+        self.local_shelves = {k: [] for k in range(self.MFA.K)} # Dict mapping component_id -> List of tensors
+
+        print(f"Finished setup of OTFP-MFA: K={self.MFA.K}, q={self.MFA.q}, Log-likelyhood threshold={self.ll_threshold} ")
+
+
+    def _run_mfa_setup(self, X):
+        
+        if self.L2_normalization:
+            X = torch.nn.functional.normalize(X, p=2, dim=1)
+
+        with torch.no_grad():
+            self.MFA.initialize_parameters(X)
+            self.MFA.fit(X) # Fit the initial model on the initial data
+            _, init_ll = self.MFA.e_step(X)
+        
+        kth_value = max(1, int(self.outlier_significance * X.shape[0]))
+        self.ll_threshold = torch.kthvalue(init_ll, kth_value).values.item()
+        return
     
-    def perform_model_selection(self, data, n_channels, q_max):
+
+    def _perform_model_selection(self, data, n_channels, q_max):
         # Dummy implementation
         K = 8      
-        q = min(q_max, n_channels)  
+        q = 5
         return K, q
 
     def process_data_block(self, X):
@@ -72,7 +76,7 @@ class MFA_OTFP:
         if num_new_outliers + self.num_outliers_on_shelf > self.outlier_update_treshold:
             # If shelf is full, update the model with outliers
             # update the model with the outliers on the shelf, this logic will be implemented as a method, but the exact detaljes are not yet determined
-            X_outliers = self.outliers_shelf[:self.num_outliers_on_shelf]
+            X_outliers = self.global_outliers_shelf[:self.num_outliers_on_shelf]
             X_outliers = torch.cat([X_outliers, X[outlier_mask]], dim=0) # Add the new outliers to the outliers on the shelf
 
             # Update routine, I will: 
@@ -141,7 +145,7 @@ class MFA_OTFP:
             start_idx = self.num_outliers_on_shelf
             end_idx = start_idx + num_new_outliers
             
-            self.outliers_shelf[start_idx : end_idx] = X[outlier_mask]
+            self.global_outliers_shelf[start_idx : end_idx] = X[outlier_mask]
             
             self.num_outliers_on_shelf += num_new_outliers
         

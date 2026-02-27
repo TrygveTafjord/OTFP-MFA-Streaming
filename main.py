@@ -1,5 +1,4 @@
 import multiprocessing
-import queue
 import glob
 import time
 import torch
@@ -47,7 +46,7 @@ if __name__ == "__main__":
     
     # Create a thread-safe queue, could calcuate maxsize based on data-info, for now just set it arbitrarirly
 
-    queue = queue.Queue(maxsize=200) 
+    queue = multiprocessing.Queue(maxsize=200) 
 
     # Start the producer thread
     producer_thread = multiprocessing.Process(
