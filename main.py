@@ -1,8 +1,8 @@
-import multiprocessing
 import glob
 import time
 import torch
 import os
+from multiprocessing import Queue, Process
 from data_fetcher import producer, fetch_init_data, DataProduct
 from otfp import MFA_OTFP
 
@@ -22,20 +22,22 @@ IMAGE_PATHS = glob.glob(f'data/training_{DATA_PRODUCT.value}/*.nc')
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-initial_batch = fetch_init_data(IMAGE_PATHS, N_SAMPLES_FIRST_MODEL, DATA_PRODUCT)
-
-# Initialize the MFA-based OTFP model
-MFA_OTFP_model = MFA_OTFP(
-    init_data=initial_batch,
-    n_channels=NUM_CHANNELS, 
-    outlier_significance=OUTLIER_SIGNIFICANCE, 
-    device=device, 
-    outlier_update_treshold=OUTLIER_UPDATE_TRESHOLD,
-    q_max=Q_MAX,
-    L2_normalization=True
-)
-
 if __name__ == "__main__":
+
+    initial_batch = fetch_init_data(IMAGE_PATHS, N_SAMPLES_FIRST_MODEL, DATA_PRODUCT)
+
+    # Initialize the MFA-based OTFP model
+    MFA_OTFP_model = MFA_OTFP(
+        init_data=initial_batch,
+        n_channels=NUM_CHANNELS, 
+        outlier_significance=OUTLIER_SIGNIFICANCE, 
+        device=device, 
+        outlier_update_treshold=OUTLIER_UPDATE_TRESHOLD,
+        q_max=Q_MAX,
+        L2_normalization=True
+    )
+
+    del initial_batch
     
     start_time = 0
     if PERFORM_TIMING:
@@ -46,10 +48,10 @@ if __name__ == "__main__":
     
     # Create a thread-safe queue, could calcuate maxsize based on data-info, for now just set it arbitrarirly
 
-    queue = multiprocessing.Queue(maxsize=200) 
+    queue = Queue(maxsize=200) 
 
     # Start the producer thread
-    producer_thread = multiprocessing.Process(
+    producer_thread = Process(
         target=producer, 
         args=(IMAGE_PATHS, queue, DATA_PRODUCT, 5000),
         daemon=True

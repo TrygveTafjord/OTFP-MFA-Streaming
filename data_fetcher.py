@@ -2,7 +2,7 @@ from hypso import Hypso
 import numpy as np
 from enum import Enum
 import torch
-from queue import Queue
+from multiprocessing import Queue
 
 
 class DataProduct(Enum):

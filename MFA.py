@@ -28,7 +28,7 @@ class MFA(nn.Module):
         with torch.no_grad():
             for i in range(self.max_iter):
                 # --- E-Step ---
-                log_resp, log_likelihood = self.e_step(X)
+                log_resp, log_likelihood, _ = self.e_step(X)
                 current_ll = log_likelihood.mean()
                 
                 # --- M-Step ---
@@ -44,34 +44,28 @@ class MFA(nn.Module):
             self.final_ll = prev_ll * N 
         
     def e_step(self, X):
-        log_resps = []
+        """
+        Performs the Expectation step.
+        Returns:
+        -Normalized responsibilitiest P(x_i) = Sum(P(X_i | w_j) pi_j)
+        -Total log-likelihood h_ij = P(w_j|x_i) = (P(X_i | w_j) pi_j)/P(x_i)
+        -Raw geometric fits.
+        """
+        # 1. Get the pure physical/geometric fit (Shape: [N, K])
+        log_probs = self.compute_component_log_likelihoods(X)
         
-        for k in range(self.K):
-            L_k = self.Lambda[k] 
-            
-            # Extract the specific variance for component K
-            psi_k = torch.exp(self.log_psi[k]) + 1e-6
-            
-            # C_k = Lambda @ Lambda.T + Psi_k
-            C_k = L_k @ L_k.T + torch.diag(psi_k) 
-            
-            # Robustness Jitter
-            jitter = 1e-5 * torch.eye(self.D, device=self.device)
-            C_k = C_k + jitter
-            
-            try:
-                dist = torch.distributions.MultivariateNormal(self.mu[k], covariance_matrix=C_k)
-                log_prob = dist.log_prob(X)
-            except ValueError:
-                # Fallback for numerical instability
-                log_prob = torch.ones(X.shape[0], device=self.device) * -1e20
-            
-            log_resps.append(log_prob + self.log_pi[k])
-            
-        log_resps = torch.stack(log_resps, dim=1) 
-        log_likelihood = torch.logsumexp(log_resps, dim=1) 
+        # 2. Add the Bayesian Prior (log_pi) to get unnormalized responsibilities
+        # self.log_pi has shape [K]. unsqueeze(0) makes it [1, K] for perfect broadcasting against [N, K]
+        log_resps = log_probs + self.log_pi.unsqueeze(0)
+        
+        # 3. Marginalize to find the total log-likelihood for the Purity Guardrail (Shape: [N])
+        log_likelihood = torch.logsumexp(log_resps, dim=1)
+        
+        # 4. Normalize to get the final posterior responsibilities (Shape: [N, K])
         log_resp_norm = log_resps - log_likelihood.unsqueeze(1)
-        return log_resp_norm, log_likelihood
+        
+        # Return all three so OTFP can use geometry for drift, and EM can use resps for updates
+        return log_resp_norm, log_likelihood, log_probs
 
     def m_step(self, X, resp):
         N = X.shape[0]
@@ -116,6 +110,41 @@ class MFA(nn.Module):
             except Exception as e:
                 pass # Keep old Lambda and Psi if decomposition fails
     
+    def compute_component_log_likelihoods(self, X):
+        """
+        Calculates the pure structural/geometric fit of each pixel to each component.
+        This calculates log P(x_i | w_j) and entirely ignores the global mixing weights (pi).
+        
+        Returns:
+            log_probs: Tensor of shape (N, K) containing the log-likelihoods.
+        """
+        log_probs = []
+        
+        for k in range(self.K):
+            L_k = self.Lambda[k]
+            
+            # Extract the specific variance for component K
+            psi_k = torch.exp(self.log_psi[k]) + 1e-6
+            
+            # Reconstruct the local covariance matrix: C_k = Lambda @ Lambda.T + Psi_k
+            C_k = L_k @ L_k.T + torch.diag(psi_k)
+            
+            # Robustness Jitter to prevent singular matrices
+            jitter = 1e-5 * torch.eye(self.D, device=self.device)
+            C_k = C_k + jitter
+            
+            try:
+                dist = torch.distributions.MultivariateNormal(self.mu[k], covariance_matrix=C_k)
+                log_prob = dist.log_prob(X)
+            except ValueError:
+                # Fallback for numerical instability (e.g., collapsed covariance)
+                log_prob = torch.ones(X.shape[0], device=self.device) * -1e20
+            
+            log_probs.append(log_prob)
+            
+        # Stack into a single tensor of shape (N, K)
+        return torch.stack(log_probs, dim=1)
+    
     def initialize_parameters(self, X):
         """
         Initialize mu and psi using K-Means++ (via scikit-learn) for better convergence.
@@ -146,28 +175,28 @@ class MFA(nn.Module):
         """
         with torch.no_grad():
             # 1. Update mixing proportions (pi) so they sum to 1.0
-            # Convert current log_pi to linear probabilities
             current_pi = torch.exp(self.log_pi.data)
-            
-            # Scale old proportions down to make room for the new component's weight
             updated_pi = current_pi * (1.0 - new_weight)
             
-            # Combine and convert back to log-space
             new_pi_tensor = torch.cat([updated_pi, torch.tensor([new_weight], device=self.device)])
             new_log_pi = torch.log(new_pi_tensor + 1e-10)
 
-            # 2. Zero-Pad the new Lambda to match the global Q_MAX
+            # 2. Handle Tensor Shape Matching (Padding Lambda)
             q_new = new_Lambda.shape[2]
+            
+            # Scenario A: New component has FEWER factors than the global model. Pad the new component.
             if q_new < self.q:
-                # Calculate how many columns of zeros we need to add
                 pad_size = self.q - q_new
+                # F.pad with a 2-tuple pads only the last dimension (factors)
+                new_Lambda = torch.nn.functional.pad(new_Lambda, (0, pad_size))
                 
-                # F.pad format for 3D tensors: (pad_last_dim_left, pad_last_dim_right, pad_2nd_dim_left, ...)
-                # We pad the right side of the 3rd dimension (factors)
-                new_Lambda = torch.nn.functional.pad(new_Lambda, (0, pad_size, 0, 0, 0, 0))
+            # Scenario B: New component has MORE factors. Pad the existing global model!
+            elif q_new > self.q:
+                pad_size = q_new - self.q
+                self.Lambda.data = torch.nn.functional.pad(self.Lambda.data, (0, pad_size))
+                self.q = q_new # Update the global factor count
 
-            # 3. Concatenate all parameters
-            # PyTorch requires us to re-wrap them in nn.Parameter when shapes change
+            # 3. Concatenate all parameters safely
             self.log_pi = nn.Parameter(new_log_pi)
             self.mu = nn.Parameter(torch.cat([self.mu.data, new_mu], dim=0))
             self.Lambda = nn.Parameter(torch.cat([self.Lambda.data, new_Lambda], dim=0))
@@ -240,3 +269,6 @@ class MFA(nn.Module):
                 
             except Exception as e:
                 print(f"Warning: Eigendecomposition failed for component {k}. Skipping factor update. Error: {e}")
+
+
+                

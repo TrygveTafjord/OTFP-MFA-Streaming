@@ -45,7 +45,7 @@ class MFA_OTFP:
         with torch.no_grad():
             self.MFA.initialize_parameters(X)
             self.MFA.fit(X) # Fit the initial model on the initial data
-            _, init_ll = self.MFA.e_step(X)
+            _, init_ll, _ = self.MFA.e_step(X)
         
         kth_value = max(1, int(self.outlier_significance * X.shape[0]))
         self.ll_threshold = torch.kthvalue(init_ll, kth_value).values.item()
@@ -60,57 +60,50 @@ class MFA_OTFP:
 
     def process_data_block(self, X):
 
+        # 0. The 100x Guardrail for Pylance and Runtime Safety
+        if self.MFA is None:
+            raise RuntimeError("CRITICAL: MFA model was not initialized. Ensure _run_setup_routine completed successfully.")
+
         if self.L2_normalization:
             X = torch.nn.functional.normalize(X, p=2, dim=1)
 
         self.n_samples_seen += X.shape[0]
-        with torch.no_grad():
-            log_resp_norm, log_likelihood = self.MFA.e_step(X)
-
-        responsibilities = torch.exp(log_resp_norm)
-        new_cluster_ids = torch.argmax(responsibilities, dim=1)
-
-        outlier_mask = log_likelihood < self.ll_threshold
         
+        with torch.no_grad():
+            # Unpack the new geometric fits (log_probs) alongside the Bayesian repsonsibilities
+            log_resp_norm, log_likelihood, log_probs = self.MFA.e_step(X)
+
+        # -----------------------------------------------------------------
+        # 1. OUTLIER DETECTION & NEW MATERIAL DISCOVERY (The Global Guardrail)
+        # -----------------------------------------------------------------
+        outlier_mask = log_likelihood < self.ll_threshold
         num_new_outliers = outlier_mask.sum().item()
+        
         if num_new_outliers + self.num_outliers_on_shelf > self.outlier_update_treshold:
-            # If shelf is full, update the model with outliers
-            # update the model with the outliers on the shelf, this logic will be implemented as a method, but the exact detaljes are not yet determined
+            # --- SHELF IS FULL: TRIGGER NEW COMPONENT ADDITION ---
             X_outliers = self.global_outliers_shelf[:self.num_outliers_on_shelf]
-            X_outliers = torch.cat([X_outliers, X[outlier_mask]], dim=0) # Add the new outliers to the outliers on the shelf
+            X_outliers = torch.cat([X_outliers, X[outlier_mask]], dim=0)
 
-            # Update routine, I will: 
-            #1 Perform model selection on the outlier-repo
-            #2 Fit an MFA on the outlier repo
-            #3 Merge the MFA into the existing model by adding the components
-            #4 Calculate distance to the other components, to see if the new component is really new, or if it is just a small update to an existing component, 
-            # if it is just a small update, then I will merge it with the existing component instead of adding a new one, 
-            # this will be done by calculating the distance between the new component and the existing components, and if the distance is below a certain threshold, 
-            # then I will merge it with the existing component, otherwise I will add it as a new component.
-
-            # 2. Perform INSTANT model selection for q
+            # Perform INSTANT model selection for q using cumulative variance
             cov_matrix = torch.cov(X_outliers.T)
             eigenvalues = torch.linalg.eigvalsh(cov_matrix)
-            eigenvalues = torch.flip(eigenvalues, dims=[0]) # Sort descending
+            eigenvalues = torch.flip(eigenvalues, dims=[0])
 
             cumulative_variance = torch.cumsum(eigenvalues, dim=0) / torch.sum(eigenvalues)
-            # Find the first index where cumulative variance > 0.95
             q_new = torch.searchsorted(cumulative_variance, 0.95).item() + 1
-
-            # Bound q to your maximum
             q_new = min(q_new, self.q_max)
 
             print(f"Adding 1 new component with {q_new} latent factors.")
 
+            # Fit the localized MFA on the outlier repository
             temp_mfa = MFA(n_components=1, n_channels=self.MFA.D, n_factors=q_new, device=self.device)
             temp_mfa.initialize_parameters(X_outliers)
             temp_mfa.fit(X_outliers)
 
-            # 4. Calculate the weight of the new component
-            # Physically: "What percentage of the TOTAL data we have seen so far is this new material?"
+            # Calculate the initial weight of the new component
             new_weight = X_outliers.shape[0] / max(1, self.n_samples_seen)
 
-            # 5. Merge into the global model
+            # Merge into the global model
             self.MFA.add_component(
                 new_mu=temp_mfa.mu.data,
                 new_Lambda=temp_mfa.Lambda.data,
@@ -121,17 +114,17 @@ class MFA_OTFP:
             # Expand tracking tensors for the newly created component
             self.component_pixel_counts = torch.cat([self.component_pixel_counts, torch.tensor([0], device=self.device)])
             self.local_shelf_counts = torch.cat([self.local_shelf_counts, torch.tensor([0], device=self.device)])
-            
-            # Add a new shelf for the component
             self.local_shelves[self.MFA.K - 1] = []
 
+            # Evaluate new threshold (Note: we use the temp_mfa to get its pure threshold)
             with torch.no_grad():
-                _, new_ll = self.MFA.e_step(X_outliers)
+                _, new_ll, _ = temp_mfa.e_step(X_outliers)
                 
             kth_value = max(1, int(self.outlier_significance * X_outliers.shape[0]))
             new_component_threshold = torch.kthvalue(new_ll, kth_value).values.item()
             
-            # Expand the global tolerance if the new component is naturally "wider" (lower density)
+            # NOTE: For your thesis, consider tracking local thresholds rather than lowering the global one!
+            # For now, keeping your implementation:
             old_threshold = self.ll_threshold
             self.ll_threshold = min(self.ll_threshold, new_component_threshold)
             
@@ -141,45 +134,43 @@ class MFA_OTFP:
             self.n_model_updates += 1
 
         elif num_new_outliers > 0:
-            
+            # --- SHELF NOT FULL: JUST ADD OUTLIERS ---
             start_idx = self.num_outliers_on_shelf
             end_idx = start_idx + num_new_outliers
-            
             self.global_outliers_shelf[start_idx : end_idx] = X[outlier_mask]
-            
             self.num_outliers_on_shelf += num_new_outliers
         
-        # 1. Isolate pixels that are not global outliers
+        # -----------------------------------------------------------------
+        # 2. INBOUND PIXEL PROCESSING (Assignment & Drift Detection)
+        # -----------------------------------------------------------------
         inbound_mask = ~outlier_mask
         if not inbound_mask.any():
             return # Entire block was outliers, nothing more to do
 
         X_in = X[inbound_mask]
-        resp_in = responsibilities[inbound_mask]
         log_resp_norm_in = log_resp_norm[inbound_mask]
+        log_probs_in = log_probs[inbound_mask] # NEW: Extract the pure geometric fits
+        resp_in = torch.exp(log_resp_norm_in) 
         
-        # 2. Isolate "clean" pixels (The Purity Guardrail)
-        # Shannon entropy: H = -sum(p * log(p)). Low entropy = high purity.
+        # A. The Purity Guardrail (Shannon Entropy)
+        # We still use the full posterior (resp_in) to check if the model is confused
         entropy = -torch.sum(resp_in * log_resp_norm_in, dim=1)
         
-        # Pixels with entropy near 0 are overwhelmingly assigned to a single component
-        purity_threshold = 0.5 # You can tune this. Lower = stricter purity
+        purity_threshold = 0.5
         pure_mask = entropy < purity_threshold
         
-        # Extract the pure pixels and find their assigned component
         X_pure = X_in[pure_mask]
-        best_components = torch.argmax(resp_in[pure_mask], dim=1)
         
-        # Extract the actual unnormalized log-probability (Proxy for Mahalanobis / Hotelling's T^2)
-        # log_resp_norm = log_prob + log_pi - log_likelihood -> log_prob = log_resp_norm + log_likelihood - log_pi
-        log_prob_pure = log_resp_norm_in[pure_mask, best_components] + log_likelihood[inbound_mask][pure_mask] - self.MFA.log_pi[best_components]
-
-        # 3. Route pure pixels to Local Shelves or skip them
-        # We need a dynamic update threshold. For now, we assume if the log_prob is below the 
-        # top 50% of the component's normal fit, it's "drifting" and needs an update.
+        # B. Geometric Component Assignment (Bypassing the Prior Trap)
+        # We assign components based purely on physical shape (log_probs_in)
+        best_components = torch.argmax(log_probs_in[pure_mask], dim=1)
         
+        # Extract the pure unnormalized log-probability directly! No reverse engineering needed.
+        # This acts as our Mahalanobis / Hotelling's T^2 proxy
+        log_prob_pure = log_probs_in[pure_mask, best_components]
+        
+        # C. Route pure pixels to Local Shelves or skip them
         for k in range(self.MFA.K):
-            # Find pure pixels belonging to component K
             k_mask = (best_components == k)
             if not k_mask.any():
                 continue
@@ -188,52 +179,40 @@ class MFA_OTFP:
             log_prob_k = log_prob_pure[k_mask]
             
             # --- DRIFT DETECTION ---
-            # If we don't have a local threshold yet, use a placeholder (you will want to track this dynamically per component later)
-            local_drift_threshold = self.ll_threshold + 50 # Example: slightly higher than global threshold
+            # TODO: Replace this hardcoded +50 with a dynamic component-specific tracking system
+            local_drift_threshold = self.ll_threshold + 50
             
             drifting_mask = log_prob_k < local_drift_threshold
+            
             if drifting_mask.any():
                 X_drifting = X_k[drifting_mask]
                 self.local_shelves[k].append(X_drifting)
                 self.local_shelf_counts[k] += X_drifting.shape[0]
                 
-                # 5. If the repo is full -> update the component!
+                # --- LOCAL SHELF IS FULL: UPDATE COMPONENT ---
                 if self.local_shelf_counts[k] >= self.outlier_update_treshold:
-                    # Stitch the shelf together
                     X_update = torch.cat(self.local_shelves[k], dim=0)
-                    
                     print(f"Component {k} drifting! Updating factors using {X_update.shape[0]} pixels...")
                     
-                    # Perform the Online EM update for this specific component
                     self.MFA.update_single_component(k, X_update)
                     
-                    # Empty the shelf
                     self.local_shelves[k] = []
                     self.local_shelf_counts[k] = 0
                 
-            # 6. Perfectly Explained Pixels -> Do not update the FA! 
+            # --- PERFECTLY EXPLAINED PIXELS ---
             perfect_mask = ~drifting_mask
             if perfect_mask.any():
-                # Just keep track of the count for future weight recalculations
                 self.component_pixel_counts[k] += perfect_mask.sum().item()
 
-        # Check what clusters each well-explained pixel belongs to
-        
-        #1 Isolate pixels that are well explained by the model (high log_likelyhood)
-        
-        #2 Isolate "clean" pixels that are only well explained by one of the components, this is done by calculating the Shannon entropy of your responsibilities matrix for each pixel
-
-        #4 If the pixel is only somewhat well explained, add it to a component update - repository <- I might drop updates! Or I could use hotellings t^2 to find pixels that hace the correct covarianse-structure.
-        
-        #5 If the repo is full -> update the component (perhaps by performing weighted bayesian inference?)
-
-        #6 If the pixel is really well explained, increase the count of well explained pixels
+        # -----------------------------------------------------------------
+        # 3. GLOBAL STATE UPDATES
+        # -----------------------------------------------------------------
         self.blocks_processed += 1
         
-        # Update the mixing weights every 100 blocks (tune this based on your data rate)
         if self.blocks_processed % 100 == 0:
             self.update_global_weights()
-        return 
+            
+        return
     
     def update_global_weights(self):
         """
