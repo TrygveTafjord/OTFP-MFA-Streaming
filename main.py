@@ -11,8 +11,8 @@ PERFORM_TIMING = True
 
 ## MODEL PARAMETERS
 NUM_CHANNELS = 120                          
-OUTLIER_SIGNIFICANCE = 0.01                 
-OUTLIER_UPDATE_TRESHOLD = 3000               
+OUTLIER_SIGNIFICANCE = 0.0001                 
+OUTLIER_UPDATE_TRESHOLD = 1000               
 Q_MAX = 10 
 
 # Data parameters 
@@ -75,7 +75,7 @@ if __name__ == "__main__":
             MFA_OTFP_model.process_data_block(X=projection_data)
             n_processed_blocks += 1
             if n_processed_blocks % 1000 == 0: 
-                print(f"Processed; {n_processed_blocks} blocks of data")
+                print(f"==== Processed; {n_processed_blocks} blocks of data ====")
             
     except KeyboardInterrupt:
         print("\nStreaming interrupted by user.")

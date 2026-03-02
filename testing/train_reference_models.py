@@ -6,8 +6,8 @@ import time
 import os
 
 data_product = DataProduct.L1B
-K = 9  # Number of MFA compobnents to use 
-q = 10 # Latent dimensionality for MFA
+K = 8  # Number of MFA compobnents to use 
+q = 5  # Latent dimensionality for MFA
 Train_PCA_on_L2Normalized = False
 Train_MFA_on_L2Normalized = True
 
@@ -16,7 +16,7 @@ Train_MFA_on_L2Normalized = True
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-data_dir = glob.glob(f'./data/training_{data_product.value}/*.nc')
+data_dir = glob.glob(f'../data/training_{data_product.value}/*.nc')
 print(f"Found {len(data_dir)} files.")
 
 
@@ -25,7 +25,6 @@ target_total_samples = 200000
 data_list = get_data(data_dir, data_product, target_total_samples)
 
 data = torch.from_numpy(data_list).float().to(device)
-
 
 if Train_MFA_on_L2Normalized:
     print("Applying L2 Normalization to data")
