@@ -81,7 +81,7 @@ class MFA_OTFP:
         return K, q
 
     def process_data_block(self, X):
-         # SWITCH TO USING log_likelyhood for detecting outliers!!!
+         # SWITCH TO USING log_likelyhood for detecting outliers!!! -> Or try at least...
 
         if self.MFA is None:
             raise RuntimeError("CRITICAL: MFA model was not initialized.")
@@ -119,7 +119,6 @@ class MFA_OTFP:
             dominant_cluster_idx = torch.argmax(cluster_counts).item()
             dominant_size = cluster_counts[dominant_cluster_idx].item()
             
-            # --- THE GUARDRAIL ---
             # Don't model the static. If the dominant cluster is less than 15% of the shelf, it's a ghost.
             MIN_PURE_PIXELS = int(self.outlier_update_treshold * 0.15)
             
@@ -136,39 +135,42 @@ class MFA_OTFP:
                 cumulative_variance = torch.cumsum(eigenvalues, dim=0) / torch.sum(eigenvalues)
                 q_new = torch.searchsorted(cumulative_variance, 0.95).item() + 1
                 print(f"Needed: {q_new} PCs to describe 95% of variance in the setup")
-                q_new = min(q_new, self.q_max)
-
-                temp_mfa = MFA(n_components=1, n_channels=self.MFA.D, n_factors=q_new, device=self.device)
-                temp_mfa.initialize_parameters(X_pure)
-                temp_mfa.fit(X_pure)
-
-                new_weight = X_pure.shape[0] / max(1, self.n_samples_seen)
-
-                self.MFA.add_component(
-                    new_mu=temp_mfa.mu.data,
-                    new_Lambda=temp_mfa.Lambda.data,
-                    new_log_psi=temp_mfa.log_psi.data,
-                    new_weight=new_weight
-                )
-
-                self.component_pixel_counts = torch.cat([self.component_pixel_counts, torch.tensor([0], device=self.device)])
-                self.local_shelf_counts = torch.cat([self.local_shelf_counts, torch.tensor([0], device=self.device)])
-                self.local_shelves[self.MFA.K - 1] = []
-
-                # Calculate the boundary for this specific new material
-                with torch.no_grad():
-                    _, _, new_log_probs = temp_mfa.e_step(X_pure)
-                    
-                kth_value = max(1, int(self.outlier_significance * X_pure.shape[0]))
-                new_component_threshold = torch.kthvalue(new_log_probs[:, 0], kth_value).values.item()
                 
-                self.local_thresholds = torch.cat([
-                    self.local_thresholds, 
-                    torch.tensor([new_component_threshold], device=self.device, dtype=torch.float32)
-                ])
-                
-                print(f"New material boundary set in stone at LL: {new_component_threshold:.2f}")
-                self.n_model_updates += 1
+                if q_new <= self.q_max:
+
+                    temp_mfa = MFA(n_components=1, n_channels=self.MFA.D, n_factors=q_new, device=self.device)
+                    temp_mfa.initialize_parameters(X_pure)
+                    temp_mfa.fit(X_pure)
+
+                    new_weight = X_pure.shape[0] / max(1, self.n_samples_seen)
+
+                    self.MFA.add_component(
+                        new_mu=temp_mfa.mu.data,
+                        new_Lambda=temp_mfa.Lambda.data,
+                        new_log_psi=temp_mfa.log_psi.data,
+                        new_weight=new_weight
+                    )
+
+                    self.component_pixel_counts = torch.cat([self.component_pixel_counts, torch.tensor([0], device=self.device)])
+                    self.local_shelf_counts = torch.cat([self.local_shelf_counts, torch.tensor([0], device=self.device)])
+                    self.local_shelves[self.MFA.K - 1] = []
+
+                    # Calculate the boundary for this specific new material
+                    with torch.no_grad():
+                        _, _, new_log_probs = temp_mfa.e_step(X_pure)
+
+                    kth_value = max(1, int(self.outlier_significance * X_pure.shape[0]))
+                    new_component_threshold = torch.kthvalue(new_log_probs[:, 0], kth_value).values.item()
+
+                    self.local_thresholds = torch.cat([
+                        self.local_thresholds, 
+                        torch.tensor([new_component_threshold], device=self.device, dtype=torch.float32)
+                    ])
+
+                    print(f"New material boundary set in stone at LL: {new_component_threshold:.2f}")
+                    self.n_model_updates += 1
+                else:
+                    print("Needed to many components to fit the shelf, it is just noise!")
             else:
                 print(f"Shelf full, but dominant cluster only has {dominant_size} pixels. Just ghosts and noise.")
 
