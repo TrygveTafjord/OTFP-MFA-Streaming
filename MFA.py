@@ -86,7 +86,7 @@ class MFA(nn.Module):
             
             try:
                 vals, vecs = torch.linalg.eigh(S_k)
-                idx = torch.argsort(vals, descending=True)ø
+                idx = torch.argsort(vals, descending=True)
                 top_vals = vals[idx[:self.q]]
                 top_vecs = vecs[:, idx[:self.q]]
                 
