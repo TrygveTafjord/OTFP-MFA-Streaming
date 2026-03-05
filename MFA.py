@@ -86,11 +86,11 @@ class MFA(nn.Module):
             
             try:
                 vals, vecs = torch.linalg.eigh(S_k)
-                idx = torch.argsort(vals, descending=True)
+                idx = torch.argsort(vals, descending=True)ø
                 top_vals = vals[idx[:self.q]]
                 top_vecs = vecs[:, idx[:self.q]]
                 
-                top_vals = torch.clamp(top_vals, min=1e-6)
+                top_vals = torch.clamp(top_vals, min=1e-3)
                 self.Lambda.data[k] = top_vecs * torch.sqrt(top_vals).unsqueeze(0)
                 
                 # CHANGE 3: Update Psi for this specific component!
@@ -205,4 +205,6 @@ class MFA(nn.Module):
             # 4. Increment the internal component counter
             self.K += 1
             print(f"Model successfully updated! Total components (K) is now {self.K}")
+    
+    
     

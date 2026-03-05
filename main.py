@@ -11,7 +11,7 @@ PERFORM_TIMING = True
 
 ## MODEL PARAMETERS
 NUM_CHANNELS = 120                          
-OUTLIER_SIGNIFICANCE = 0.0001                 
+NUM_SIGMA = 4.0                 
 OUTLIER_UPDATE_TRESHOLD = 400               
 Q_MAX = 10 
 
@@ -30,7 +30,7 @@ if __name__ == "__main__":
     MFA_OTFP_model = MFA_OTFP(
         init_data=initial_batch,
         n_channels=NUM_CHANNELS, 
-        outlier_significance=OUTLIER_SIGNIFICANCE, 
+        outlier_significance=NUM_SIGMA, 
         device=device, 
         outlier_update_treshold=OUTLIER_UPDATE_TRESHOLD,
         q_max=Q_MAX,
@@ -64,6 +64,7 @@ if __name__ == "__main__":
         while True:
             
             projection_data = queue.get() 
+            projection_data = torch.tensor(projection_data, dtype=torch.float32).to(device, non_blocking=True)
 
             if projection_data == "FINISHED":
                 print("\nSimulation finished.")

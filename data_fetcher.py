@@ -44,8 +44,8 @@ def producer(file_list : list[str], data_queue : Queue, data_product : DataProdu
 
         for i in range(0, pixels_2d.shape[0], batch_size):
             batch = pixels_2d[i:i+batch_size]
-            batch_tensor = torch.tensor(batch, dtype=torch.float32)
-            data_queue.put(batch_tensor)
+            #batch_tensor = torch.tensor(batch, dtype=torch.float32)
+            data_queue.put(batch)
                 
     # Send a "done" signal
     data_queue.put("FINISHED")
