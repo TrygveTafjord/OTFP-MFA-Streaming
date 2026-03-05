@@ -206,5 +206,28 @@ class MFA(nn.Module):
             self.K += 1
             print(f"Model successfully updated! Total components (K) is now {self.K}")
     
-    
-    
+    def compute_q_residuals(self, X):
+        """
+        Calculates the Squared Prediction Error (Q-residual) for each pixel 
+        against the subspace of each component.
+        Returns: Q_res of shape (N, K)
+        """
+        N = X.shape[0]
+        Q_res = torch.zeros(N, self.K, device=self.device)
+        
+        for k in range(self.K):
+            Xc = X - self.mu[k] # Center the data
+            
+            # Extract orthonormal basis U from Lambda using QR decomposition
+            # This is numerically stable and gives us the pure geometric plane
+            U, _ = torch.linalg.qr(self.Lambda[k]) 
+            
+            # Project onto the plane and reconstruct
+            projection = Xc @ U 
+            reconstruction = projection @ U.T 
+            
+            # The Q-residual is the squared orthogonal distance off the plane
+            error = Xc - reconstruction
+            Q_res[:, k] = torch.sum(error ** 2, dim=1)
+            
+        return Q_res

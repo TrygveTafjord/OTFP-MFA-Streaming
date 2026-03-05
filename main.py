@@ -12,12 +12,12 @@ PERFORM_TIMING = True
 ## MODEL PARAMETERS
 NUM_CHANNELS = 120                          
 NUM_SIGMA = 4.0                 
-OUTLIER_UPDATE_TRESHOLD = 400               
-Q_MAX = 10 
+OUTLIER_UPDATE_TRESHOLD = 1000               
+Q_MAX = 8 
 
 # Data parameters 
 DATA_PRODUCT = DataProduct.L1B
-N_SAMPLES_FIRST_MODEL = 15000 # Increased for better BIC initialization
+N_SAMPLES_FIRST_MODEL = 2000 # Increased for better BIC initialization
 IMAGE_PATHS = glob.glob(f'data/training_{DATA_PRODUCT.value}/*.nc')
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'

@@ -16,9 +16,6 @@ class MFA_OTFP:
         self.MFA = MFA(n_components=K, n_channels=n_channels, n_factors=q).to(self.device)
         
         self.component_repos = {}
-
-        # Use a single global threshold
-        self.global_threshold = 0.0 
         
         self._run_mfa_setup(init_data)
         
@@ -46,14 +43,13 @@ class MFA_OTFP:
             self.MFA.initialize_parameters(X)
             self.MFA.fit(X) 
             log_resp_norm, log_likelihood, log_probs = self.MFA.e_step(X)
+            
+            # Calculate Q-residuals for all training data for our new outlier metric
+            Q_all = self.MFA.compute_q_residuals(X)
         
-        # 1. --- Global Threshold Setup (Median + MAD) ---
-        median_ll = torch.median(log_likelihood)
-        mad_ll = torch.median(torch.abs(log_likelihood - median_ll))
-        robust_std_ll = 1.4826 * mad_ll
-        
+        # 1. --- Q-Residual Thresholds Setup ---
+        self.q_thresholds = torch.zeros(self.MFA.K, device=self.device)
         self.num_sigma = 4.0 
-        self.global_threshold = (median_ll - (self.num_sigma * robust_std_ll)).item()
         
         # 2. --- Extract Anchors & Set Local Thresholds ---
         self.repo_size = 240
@@ -67,16 +63,27 @@ class MFA_OTFP:
             X_k = X[mask_k]
             
             if len(X_k) > 0:
+                # --- A. Set Q-Residual Threshold (For Global Outliers) ---
+                q_k = Q_all[mask_k, k]
+                median_q = torch.median(q_k)
+                mad_q = torch.median(torch.abs(q_k - median_q))
+                robust_std_q = 1.4826 * mad_q
+                
+                # Limit = Median + (Sigma * Robust Std). Above this = Global Outlier
+                self.q_thresholds[k] = median_q + (self.num_sigma * robust_std_q)
+                
+                # --- B. Anchor Extraction ---
                 probs_k = log_probs[mask_k, k]
                 num_to_take = min(self.repo_size, len(X_k))
                 
-                # Get the absolute best-fitting pixels
+                # Get the absolute best-fitting pixels (highest log-likelihood)
                 top_values, top_indices = torch.topk(probs_k, num_to_take)
                 self.component_repos[k] = X_k[top_indices].clone()
                 
-                # Set the local 3-sigma threshold for THIS specific component
-                med_p = torch.median(top_values)
-                mad_p = torch.median(torch.abs(top_values - med_p))
+                # --- C. Set Local Likelihood Threshold (For Drifters) ---
+                med_p = torch.median(probs_k)
+                mad_p = torch.median(torch.abs(probs_k - med_p))
+
                 local_std = 1.4826 * mad_p
                 
                 # If a pixel's fit drops below this, it is a shadow/drifter
@@ -84,14 +91,15 @@ class MFA_OTFP:
                 
             else:
                 self.component_repos[k] = torch.empty((0, self.n_channels), device=self.device)
+                self.q_thresholds[k] = 1e6 # High fallback so nothing is flagged against an empty component
                 self.local_thresholds[k] = -float('inf')
 
-        print(f"Global anomaly threshold initialized: {self.global_threshold:.2f}")
+        print(f"Q-residual anomaly thresholds initialized for {self.MFA.K} components.")
         return
 
     def _perform_model_selection(self, data, n_channels, q_max):
         # Dummy implementation
-        K = 6      
+        K = 4      
         q = 5
         return K, q
 
@@ -105,10 +113,14 @@ class MFA_OTFP:
         self.n_samples_seen += X.shape[0]
         
         with torch.no_grad():
-            # We need log_probs back to figure out which component the inliers belong to
-            _, log_likelihood, log_probs = self.MFA.e_step(X)
+            # E-step gives log_probs (geometry) for drifter tracking
+            _, _, log_probs = self.MFA.e_step(X)
+            
+            # Q-residuals gives orthogonal distance for global outliers
+            Q_res = self.MFA.compute_q_residuals(X)
 
-        outlier_mask = log_likelihood < self.global_threshold
+        # A pixel is an outlier ONLY if it violates the Q-limit for ALL known components
+        outlier_mask = (Q_res > self.q_thresholds).all(dim=1)
         inlier_mask = ~outlier_mask
         
         num_new_outliers = outlier_mask.sum().item()
@@ -117,7 +129,7 @@ class MFA_OTFP:
         # 1. TRACK INLIERS & CATCH LOCAL DRIFTERS (SHADOWS/MIXTURES)
         # =====================================================================
         if inlier_mask.any():
-            X_inliers = X[inlier_mask]  # We need the actual pixel data to save drifters
+            X_inliers = X[inlier_mask] 
             inlier_probs = log_probs[inlier_mask]
             best_components = torch.argmax(inlier_probs, dim=1)
             
@@ -125,7 +137,7 @@ class MFA_OTFP:
             counts = torch.bincount(best_components, minlength=self.MFA.K)
             self.component_pixel_counts += counts
 
-            # --- STEP 2: CATCH THE DRIFTERS IN THE STREAM ---
+            # Catch the drifters
             for k in range(self.MFA.K):
                 mask_k = (best_components == k)
                 if not mask_k.any():
@@ -134,18 +146,16 @@ class MFA_OTFP:
                 X_k = X_inliers[mask_k]
                 geom_fit_k = inlier_probs[mask_k, k]
                 
-                # Identify the pixels that are "drifting" (shadows, mixtures, seasonal change)
+                # Drifters: Good Q-res (shape matches), but bad Log-Likelihood (shadows/shifts)
                 drifter_mask = geom_fit_k < self.local_thresholds[k]
                 
                 if drifter_mask.any():
-                    X_drifters = X_k[drifter_mask]
-                    self.local_shelves[k].append(X_drifters)
+                    self.local_shelves[k].append(X_k[drifter_mask])
                     
                     # Check if the shelf is full enough to trigger a Momentum M-Step
                     total_drifters = sum([t.shape[0] for t in self.local_shelves[k]])
                     if total_drifters >= 500:
                         self._drift_component(k)
-        # =====================================================================
 
         # =====================================================================
         # 2. GLOBAL OUTLIER SHELF & COMPONENT BIRTHING
@@ -155,28 +165,21 @@ class MFA_OTFP:
             X_outliers = self.global_outliers_shelf[:self.num_outliers_on_shelf]
             X_outliers = torch.cat([X_outliers, X[outlier_mask]], dim=0)
 
-            # Use DBSCAN to isolate true signals from random noise ---
             from sklearn.cluster import DBSCAN
-            
-            # eps=0.05 on cosine distance means pixels must be highly directionally similar.
-            # min_samples ensures we don't build models for tiny micro-clusters.
-            dbscan = DBSCAN(eps=0.05, min_samples=2*self.n_channels, metric='cosine')
+            dbscan = DBSCAN(eps=0.05, min_samples=int(0.75*self.outlier_update_treshold), metric='cosine')
             labels = dbscan.fit_predict(X_outliers.cpu().numpy())
             labels_tensor = torch.tensor(labels, device=self.device)
             
-            # Filter out the pure noise (DBSCAN labels noise as -1)
             valid_mask = labels_tensor >= 0
             
             if not valid_mask.any():
                 print("Shelf full, but only contained scattered noise. Burning shelf.")
             else:
-                # Find the largest coherent cluster among the non-noise points
                 valid_labels = labels_tensor[valid_mask]
                 cluster_counts = torch.bincount(valid_labels)
                 dominant_cluster_idx = int(torch.argmax(cluster_counts).item())
                 dominant_size = cluster_counts[dominant_cluster_idx].item()
                 
-                # Require a minimum density to justify birthing a new component
                 MIN_PURE_PIXELS = int(self.outlier_update_treshold * 0.15)
                 
                 if dominant_size >= MIN_PURE_PIXELS:
@@ -199,57 +202,48 @@ class MFA_OTFP:
                             temp_mfa.initialize_parameters(X_pure)
                             temp_mfa.fit(X_pure)
 
-                            new_weight = X_pure.shape[0] / max(1, self.n_samples_seen)
+                        new_weight = X_pure.shape[0] / max(1, self.n_samples_seen)
 
-                            self.MFA.add_component(
-                                new_mu=temp_mfa.mu.data,
-                                new_Lambda=temp_mfa.Lambda.data,
-                                new_log_psi=temp_mfa.log_psi.data,
-                                new_weight=new_weight
-                            )
+                        self.MFA.add_component(
+                            new_mu=temp_mfa.mu.data,
+                            new_Lambda=temp_mfa.Lambda.data,
+                            new_log_psi=temp_mfa.log_psi.data,
+                            new_weight=new_weight
+                        )
 
-                            # 1. Evaluate the data on the updated MFA (Note: we need log_probs_new here!)
-                            log_resp_norm_new_data, _, log_probs_new = self.MFA.e_step(X)
-                        
-                        # 2. Isolate the responsibilities specifically for the NEW component (the last one)
                         new_comp_idx = self.MFA.K - 1 
-                        new_comp_probs = log_resp_norm_new_data[:, new_comp_idx]
-                        
-                        # 3. Get the top pixels that fit this new component
-                        num_to_take = min(2 * self.n_channels, len(X))
-                        _, top_indices = torch.topk(new_comp_probs, num_to_take)
-                        
-                        # 4. Update your trackers and repos using the correct index
-                        self.component_pixel_counts = torch.cat([self.component_pixel_counts, torch.tensor([0], device=self.device)])
-                        self.local_shelf_counts = torch.cat([self.local_shelf_counts, torch.tensor([0], device=self.device)])
-                        self.local_shelves[new_comp_idx] = []
-                        self.component_repos[new_comp_idx] = X[top_indices].clone()
-                        
-                        # --- FIX: INITIALIZE THE LOCAL THRESHOLD FOR THE NEW COMPONENT ---
-                        self.local_thresholds = torch.cat([self.local_thresholds, torch.tensor([0.0], device=self.device)])
-                        new_geom_fits = log_probs_new[top_indices, new_comp_idx]
-                        med_p = torch.median(new_geom_fits)
-                        mad_p = torch.median(torch.abs(new_geom_fits - med_p))
-                        local_std = 1.4826 * mad_p
-                        self.local_thresholds[new_comp_idx] = (med_p - (3.0 * local_std)).item()
-                        # -----------------------------------------------------------------
 
-                        # 5. Concatenate all anchor pixels across all components
-                        repo_tensors = [self.component_repos[i] for i in range(self.MFA.K)]
-                        total_dataset = torch.cat(repo_tensors, dim=0)
-                        
-                        # 6. Calculate the new global threshold based on the combined anchors
+                        # --- INTEGRATE NEW COMPONENT TRACKERS & THRESHOLDS ---
                         with torch.no_grad():
-                            log_resp_norm, log_likelihood, log_probs = self.MFA.e_step(total_dataset)
-                        
-                        median_ll = torch.median(log_likelihood)
-                        mad_ll = torch.median(torch.abs(log_likelihood - median_ll))
-                        robust_std_ll = 1.4826 * mad_ll
-                        
-                        self.num_sigma = 6.0 
-                        self.global_threshold = (median_ll - (self.num_sigma * robust_std_ll)).item()
+                            # 1. Set Global Q-Threshold using pure pixels
+                            Q_pure = self.MFA.compute_q_residuals(X_pure)
+                            q_new_comp = Q_pure[:, new_comp_idx] 
+                            
+                            median_q_new = torch.median(q_new_comp)
+                            mad_q_new = torch.median(torch.abs(q_new_comp - median_q_new))
+                            limit_new = median_q_new + (self.num_sigma * 1.4826 * mad_q_new)
+                            self.q_thresholds = torch.cat([self.q_thresholds, torch.tensor([limit_new], device=self.device)])
+                            
+                            # 2. Extract best pure anchors and set Local Likelihood Threshold
+                            _, _, log_probs_pure = self.MFA.e_step(X_pure)
+                            pure_geom_fits = log_probs_pure[:, new_comp_idx]
+                            
+                            num_to_take = min(self.repo_size, len(X_pure))
+                            top_values, top_indices = torch.topk(pure_geom_fits, num_to_take)
+                            
+                            med_p = torch.median(pure_geom_fits)
+                            mad_p = torch.median(torch.abs(pure_geom_fits - med_p))
+                            local_std = 1.4826 * mad_p
+                            new_local_thresh = (med_p - (3.0 * local_std)).item()
+                            self.local_thresholds = torch.cat([self.local_thresholds, torch.tensor([new_local_thresh], device=self.device)])
 
-            # Burn the shelf (happens regardless of whether a component was birthed or if it was all noise)
+                            # 3. Update arrays and repositories
+                            self.component_repos[new_comp_idx] = X_pure[top_indices].clone()
+                            self.component_pixel_counts = torch.cat([self.component_pixel_counts, torch.tensor([0], device=self.device)])
+                            self.local_shelf_counts = torch.cat([self.local_shelf_counts, torch.tensor([0], device=self.device)])
+                            self.local_shelves[new_comp_idx] = []
+
+            # Burn the shelf
             self.num_outliers_on_shelf = 0
 
         # =====================================================================
@@ -270,6 +264,8 @@ class MFA_OTFP:
             self.update_global_weights()
             
         return
+    
+
     def update_global_weights(self, decay_factor=0.9):
         """
         Periodically recalibrates the global mixing weights (pi) based on the 
@@ -359,19 +355,19 @@ class MFA_OTFP:
                 
                 self.local_thresholds[k] = (med_p - (3.0 * local_std)).item()
 
-            # 6. --- RECALIBRATE GLOBAL THRESHOLD ---
-            # The world just shifted, evaluate combined anchors to find the new global baseline
+            # 6. --- RECALIBRATE Q-RESIDUAL THRESHOLD ---
+            # The component's shape shifted, so its Q-residual limit must be updated.
             with torch.no_grad():
-                repo_tensors = [self.component_repos[i] for i in range(self.MFA.K)]
-                total_dataset = torch.cat(repo_tensors, dim=0)
+                # Re-evaluate the updated anchors against the updated MFA model
+                Q_anchors = self.MFA.compute_q_residuals(self.component_repos[k])
+                q_k = Q_anchors[:, k]
                 
-                _, global_ll, _ = self.MFA.e_step(total_dataset)
+                median_q = torch.median(q_k)
+                mad_q = torch.median(torch.abs(q_k - median_q))
+                robust_std_q = 1.4826 * mad_q
                 
-                median_ll = torch.median(global_ll)
-                mad_ll = torch.median(torch.abs(global_ll - median_ll))
-                robust_std_ll = 1.4826 * mad_ll
-                
-                self.global_threshold = (median_ll - (self.num_sigma * robust_std_ll)).item()
+                # Limit = Median + (Sigma * Robust Std)
+                self.q_thresholds[k] = median_q + (self.num_sigma * robust_std_q)
 
         except Exception as e:
             print(f"Warning: Drift failed for component {k} due to numerical instability: {e}")
