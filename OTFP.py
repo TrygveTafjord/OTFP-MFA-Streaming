@@ -91,8 +91,8 @@ class MFA_OTFP:
 
     def _perform_model_selection(self, data, n_channels, q_max):
         # Dummy implementation
-        K = 6      
-        q = 5
+        K = 2      
+        q = 3
         return K, q
 
     def process_data_block(self, X):

@@ -6,7 +6,7 @@ import time
 import os
 
 data_product = DataProduct.L1B
-K = 8  # Number of MFA compobnents to use 
+K = 6  # Number of MFA compobnents to use 
 q = 5  # Latent dimensionality for MFA
 Train_PCA_on_L2Normalized = False
 Train_MFA_on_L2Normalized = True
@@ -16,7 +16,7 @@ Train_MFA_on_L2Normalized = True
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-data_dir = glob.glob(f'../data/training_{data_product.value}/*.nc')
+data_dir = glob.glob(f'./data/training_{data_product.value}/*.nc')
 print(f"Found {len(data_dir)} files.")
 
 
@@ -72,7 +72,7 @@ mfa_state = {
     }
 
 os.makedirs('models', exist_ok=True)
-torch.save(mfa_state, f'models/mfa.pt')
+torch.save(mfa_state, f'testing/models/mfa.pt')
 
 
 print(f"Training PCA model")
@@ -123,5 +123,5 @@ pca_state = {
     'n_components_995': n_components_995
 }
 
-torch.save(pca_state, f'models/pca.pt')
+torch.save(pca_state, f'testing/models/pca.pt')
 print(f"PCA model saved to 'models/pca.pt'")

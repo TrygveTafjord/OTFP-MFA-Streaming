@@ -12,12 +12,12 @@ PERFORM_TIMING = True
 ## MODEL PARAMETERS
 NUM_CHANNELS = 120                          
 NUM_SIGMA = 4.0                 
-OUTLIER_UPDATE_TRESHOLD = 400               
+OUTLIER_UPDATE_TRESHOLD = 1000               
 Q_MAX = 10 
 
 # Data parameters 
 DATA_PRODUCT = DataProduct.L1B
-N_SAMPLES_FIRST_MODEL = 15000 # Increased for better BIC initialization
+N_SAMPLES_FIRST_MODEL = 5000 # Increased for better BIC initialization
 IMAGE_PATHS = glob.glob(f'data/training_{DATA_PRODUCT.value}/*.nc')
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -64,12 +64,12 @@ if __name__ == "__main__":
         while True:
             
             projection_data = queue.get() 
-            projection_data = torch.tensor(projection_data, dtype=torch.float32).to(device, non_blocking=True)
 
             if projection_data == "FINISHED":
                 print("\nSimulation finished.")
-                break 
-                
+                break
+             
+            projection_data = torch.tensor(projection_data, dtype=torch.float32).to(device, non_blocking=True)     
             projection_data = projection_data.to(device, non_blocking=True)
             
             # Stream the data block into your MFA model
@@ -85,7 +85,7 @@ if __name__ == "__main__":
         # This will run whether the loop finishes or is interrupted
         print("\n--- Final Model Statistics ---")
         print(f"Total samples seen by model: {MFA_OTFP_model.n_samples_seen}")
-        print(f"Total number of model updates: {MFA_OTFP_model.n_model_updates}")
+        print(f"Total number of model cmponents: {MFA_OTFP_model.K}")
         # You can add MFA-specific stats here later, like final K and q!
         
         if PERFORM_TIMING:
