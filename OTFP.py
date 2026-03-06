@@ -47,16 +47,18 @@ class MFA_OTFP:
             self.MFA.fit(X) 
             log_resp_norm, log_likelihood, log_probs = self.MFA.e_step(X)
         
-        # 1. --- Global Threshold Setup (Median + MAD) ---
+        # Global Threshold Setup (Median + MAD)
         median_ll = torch.median(log_likelihood)
         mad_ll = torch.median(torch.abs(log_likelihood - median_ll))
         robust_std_ll = 1.4826 * mad_ll
+
         
-        self.num_sigma = 4.0 
+        
+        self.num_sigma = 6.0 
         self.global_threshold = (median_ll - (self.num_sigma * robust_std_ll)).item()
         
         # 2. --- Extract Anchors & Set Local Thresholds ---
-        self.repo_size = 240
+        self.repo_size = 360
         self.component_repos = {}
         self.local_thresholds = torch.zeros(self.MFA.K, device=self.device)
         
@@ -92,7 +94,7 @@ class MFA_OTFP:
     def _perform_model_selection(self, data, n_channels, q_max):
         # Dummy implementation
         K = 2      
-        q = 3
+        q = 4
         return K, q
 
     def process_data_block(self, X):
@@ -177,7 +179,7 @@ class MFA_OTFP:
                 dominant_size = cluster_counts[dominant_cluster_idx].item()
                 
                 # Require a minimum density to justify birthing a new component
-                MIN_PURE_PIXELS = int(self.outlier_update_treshold * 0.15)
+                MIN_PURE_PIXELS = int(self.outlier_update_treshold * 0.75)
                 
                 if dominant_size >= MIN_PURE_PIXELS:
                     pure_material_mask = (labels_tensor == dominant_cluster_idx)
@@ -329,7 +331,6 @@ class MFA_OTFP:
             psi_proposed = torch.clamp(psi_proposed, min=1e-6)
             log_psi_proposed = torch.log(psi_proposed)
             
-            # 3. --- APPLY MOMENTUM ---
             # Smoothly blend the proposed geometry with the historical geometry
             with torch.no_grad():
                 self.MFA.mu.data[k] = (1 - alpha) * self.MFA.mu.data[k] + (alpha * mu_proposed)
@@ -338,7 +339,6 @@ class MFA_OTFP:
                 
             print(f"-> Component {k} naturally drifted! (mu, Lambda, Psi updated)")
             
-            # 4. --- UPDATE ANCHOR PIXELS (Reservoir Sampling) ---
             # Dynamically check actual repo size to prevent IndexError crashes
             actual_repo_size = self.component_repos[k].shape[0]
             num_to_replace = int(actual_repo_size * alpha)
@@ -348,7 +348,6 @@ class MFA_OTFP:
                 drifter_indices = torch.randperm(drifters.shape[0])[:num_to_replace]
                 self.component_repos[k][replace_indices] = drifters[drifter_indices].clone()
 
-            # 5. --- RECALIBRATE LOCAL THRESHOLD ---
             # Calculate the new "normal" boundary for this component
             with torch.no_grad():
                 new_geom_fits = self.MFA.compute_component_log_likelihoods(self.component_repos[k])[:, k]
@@ -359,7 +358,6 @@ class MFA_OTFP:
                 
                 self.local_thresholds[k] = (med_p - (3.0 * local_std)).item()
 
-            # 6. --- RECALIBRATE GLOBAL THRESHOLD ---
             # The world just shifted, evaluate combined anchors to find the new global baseline
             with torch.no_grad():
                 repo_tensors = [self.component_repos[i] for i in range(self.MFA.K)]
