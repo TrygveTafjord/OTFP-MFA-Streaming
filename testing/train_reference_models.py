@@ -6,7 +6,7 @@ import time
 import os
 
 data_product = DataProduct.L1B
-K = 11  # Number of MFA compobnents to use 
+K = 8  # Number of MFA compobnents to use 
 q = 4  # Latent dimensionality for MFA
 Train_PCA_on_L2Normalized = False
 Train_MFA_on_L2Normalized = True
@@ -21,6 +21,8 @@ print(f"Found {len(data_dir)} files.")
 
 
 target_total_samples = 200000
+
+start_time = time.perf_counter()
 
 data_list = get_data(data_dir, data_product, target_total_samples)
 
@@ -44,7 +46,6 @@ print("Initializing MFA")
 mfa_model.initialize_parameters(X)
 print("Training MFA")
 
-start_time = time.perf_counter()
 mfa_model.fit(X)
 end_time = time.perf_counter()
 training_time = end_time - start_time 

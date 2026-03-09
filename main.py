@@ -24,6 +24,10 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 if __name__ == "__main__":
 
+    start_time = 0
+    if PERFORM_TIMING:
+        start_time = time.perf_counter()
+
     initial_batch = fetch_init_data(IMAGE_PATHS, N_SAMPLES_FIRST_MODEL, DATA_PRODUCT)
 
     # Initialize the MFA-based OTFP model
@@ -38,10 +42,6 @@ if __name__ == "__main__":
     )
 
     del initial_batch
-    
-    start_time = 0
-    if PERFORM_TIMING:
-        start_time = time.perf_counter()
     
     seed = 42
     torch.manual_seed(seed)
