@@ -95,7 +95,7 @@ def get_data(data_dir, data_product, target_total_samples):
 def reconstruct_mfa(model, X):
     """Reconstructs X using the Component-Specific posterior expectation."""
     with torch.no_grad():
-        log_resp, _ = model.e_step(X) 
+        log_resp, _, _ = model.e_step(X) 
         responsibilities = torch.exp(log_resp) 
         cluster_ids = torch.argmax(responsibilities, dim=1)
         X_rec = torch.zeros_like(X)

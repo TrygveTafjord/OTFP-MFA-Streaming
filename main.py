@@ -4,7 +4,7 @@ import torch
 import os
 from multiprocessing import Queue, Process
 from data_fetcher import producer, fetch_init_data, DataProduct
-from otfp import MFA_OTFP
+from experimental_setups.sEM.otfp import MFA_OTFP
 
 
 PERFORM_TIMING = True
@@ -12,12 +12,12 @@ PERFORM_TIMING = True
 ## MODEL PARAMETERS
 NUM_CHANNELS = 120                          
 NUM_SIGMA = 4.0                 
-OUTLIER_UPDATE_TRESHOLD = 2000               
+OUTLIER_UPDATE_TRESHOLD = 1000               
 Q_MAX = 8 
 
 # Data parameters 
 DATA_PRODUCT = DataProduct.L1B
-N_SAMPLES_FIRST_MODEL = 2500 
+N_SAMPLES_FIRST_MODEL = 5000 
 IMAGE_PATHS = glob.glob(f'data/training_{DATA_PRODUCT.value}/*.nc')
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'

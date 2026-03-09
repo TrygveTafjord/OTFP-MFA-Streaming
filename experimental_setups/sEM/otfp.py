@@ -1,5 +1,5 @@
 import torch
-from mfa_shared_noise import MFA
+from experimental_setups.sEM.mfa import MFA
 
 class MFA_OTFP:
     def __init__(self, init_data: torch.Tensor, n_channels: int, outlier_significance: float, device: str, outlier_update_treshold: int, L2_normalization: bool = True, q_max: int = 5):
@@ -25,7 +25,6 @@ class MFA_OTFP:
         # Streaming statistics
         self.n_samples_seen = 0
         self.n_model_updates = 0
-        self.blocks_processed = 0
 
         # Memory buffers
         self.global_outliers_shelf = torch.empty((self.outlier_update_treshold, n_channels), device=self.device, dtype=torch.float32) 
@@ -45,6 +44,7 @@ class MFA_OTFP:
         with torch.no_grad():
             self.MFA.initialize_parameters(X)
             self.MFA.fit(X) 
+            self.MFA.init_sufficient_statistics(X)
             log_resp_norm, log_likelihood, log_probs = self.MFA.e_step(X)
         
         # Global Threshold Setup (Median + MAD)
@@ -119,34 +119,14 @@ class MFA_OTFP:
         # 1. TRACK INLIERS & CATCH LOCAL DRIFTERS (SHADOWS/MIXTURES)
         # =====================================================================
         if inlier_mask.any():
-            X_inliers = X[inlier_mask]  # We need the actual pixel data to save drifters
-            inlier_probs = log_probs[inlier_mask]
-            best_components = torch.argmax(inlier_probs, dim=1)
-            
-            # Count occurrences of each component and add to our tracker
-            counts = torch.bincount(best_components, minlength=self.MFA.K)
-            self.component_pixel_counts += counts
+            with torch.no_grad():
+                X_inliers = X[inlier_mask]
 
-            # --- STEP 2: CATCH THE DRIFTERS IN THE STREAM ---
-            for k in range(self.MFA.K):
-                mask_k = (best_components == k)
-                if not mask_k.any():
-                    continue
-                
-                X_k = X_inliers[mask_k]
-                geom_fit_k = inlier_probs[mask_k, k]
-                
-                # Identify the pixels that are "drifting" (shadows, mixtures, seasonal change)
-                drifter_mask = geom_fit_k < self.local_thresholds[k]
-                
-                if drifter_mask.any():
-                    X_drifters = X_k[drifter_mask]
-                    self.local_shelves[k].append(X_drifters)
-                    
-                    # Check if the shelf is full enough to trigger a Momentum M-Step
-                    total_drifters = sum([t.shape[0] for t in self.local_shelves[k]])
-                    if total_drifters >= 500:
-                        self._drift_component(k)
+                # Use the E-step to get the normalized responsibilities for the inliers
+                log_resp_norm, _, _ = self.MFA.e_step(X_inliers)
+
+                # Stream the block directly into the Stepwise EM updater
+                self.MFA.stepwise_em_update(X_inliers, log_resp_norm)
         # =====================================================================
 
         # =====================================================================
@@ -197,16 +177,26 @@ class MFA_OTFP:
                     
                     if q_new <= self.q_max:
                         with torch.no_grad():
+                            # Train the temporary MFA on the pure cluster
                             temp_mfa = MFA(n_components=1, n_channels=self.MFA.D, n_factors=q_new, device=self.device)
                             temp_mfa.initialize_parameters(X_pure)
                             temp_mfa.fit(X_pure)
 
-                            new_weight = X_pure.shape[0] / max(1, self.n_samples_seen)
+                            # --- NEW: Calculate Sufficient Statistics for the pure cluster ---
+                            # Because these pixels are 100% assigned to this component, responsibility = 1
+                            N_pure = X_pure.shape[0]
+                            new_S0 = torch.tensor([X_pure.shape[0]], dtype=torch.float32, device=self.device)
+                            new_S1 = X_pure.sum(dim=0, keepdim=True)            # Shape: (1, D)
+                            new_S2 = (X_pure.T @ X_pure).unsqueeze(0) / N_pure  # Shape: (1, D, D)
 
+                            # Pass the parameters AND the statistical mass into the global model
                             self.MFA.add_component(
                                 new_mu=temp_mfa.mu.data,
                                 new_Lambda=temp_mfa.Lambda.data,
-                                new_weight=new_weight
+                                new_log_psi=temp_mfa.log_psi.data,
+                                new_S0=new_S0,
+                                new_S1=new_S1,
+                                new_S2=new_S2
                             )
 
                             # 1. Evaluate the data on the updated MFA (Note: we need log_probs_new here!)
@@ -231,7 +221,7 @@ class MFA_OTFP:
                         new_geom_fits = log_probs_new[top_indices, new_comp_idx]
                         med_p = torch.median(new_geom_fits)
                         mad_p = torch.median(torch.abs(new_geom_fits - med_p))
-                        local_std = 1.4826 * mad_p
+                        local_std = 1.4826 * mad_p + 1e-4
                         self.local_thresholds[new_comp_idx] = (med_p - (3.0 * local_std)).item()
                         # -----------------------------------------------------------------
 
@@ -264,35 +254,9 @@ class MFA_OTFP:
             end_idx = start_idx + to_add
             self.global_outliers_shelf[start_idx : end_idx] = X[outlier_mask][:to_add]
             self.num_outliers_on_shelf += to_add
-        
-        self.blocks_processed += 1
-        
-        if self.blocks_processed % 100 == 0:
-            self.update_global_weights()
-            
+                    
         return
-    def update_global_weights(self, decay_factor=0.9):
-        """
-        Periodically recalibrates the global mixing weights (pi) based on the 
-        actual distribution of materials seen recently by the satellite.
-        """
-        # 1. Decay the old counts so the model adapts to changing landscapes (Exponential Moving Average)
-        # We convert to float for the math, then back to long (integers)
-        self.component_pixel_counts = (self.component_pixel_counts.float() * decay_factor).long()
-        self.local_shelf_counts = (self.local_shelf_counts.float() * decay_factor).long()
-        
-        # 2. Combine all known pixels assigned to each component
-        total_counts = self.component_pixel_counts + self.local_shelf_counts
-        
-        # 3. Apply Laplace Smoothing to prevent log(0) for new/rare components
-        smoothed_counts = total_counts + 1.0 
-        
-        # 4. Calculate the new linear probabilities
-        new_pi = smoothed_counts / smoothed_counts.sum()
-        
-        # 5. Safely inject the new weights into the MFA model in log-space
-        with torch.no_grad():
-            self.MFA.log_pi.data = torch.log(new_pi)
+
     
     def _drift_component(self, k, alpha=0.05):
         """
@@ -324,16 +288,19 @@ class MFA_OTFP:
             
             Lambda_proposed = top_vecs * torch.sqrt(top_vals).unsqueeze(0)
             
-            # NOTE: We no longer calculate or update psi_proposed here!
-            # The sensor noise is a global assumption, not a local one.
+            # Diagonal Noise Update (Psi)
+            recon_cov = Lambda_proposed @ Lambda_proposed.T
+            psi_proposed = torch.diagonal(S_k) - torch.diagonal(recon_cov)
+            psi_proposed = torch.clamp(psi_proposed, min=1e-6)
+            log_psi_proposed = torch.log(psi_proposed)
             
             # Smoothly blend the proposed geometry with the historical geometry
             with torch.no_grad():
                 self.MFA.mu.data[k] = (1 - alpha) * self.MFA.mu.data[k] + (alpha * mu_proposed)
                 self.MFA.Lambda.data[k] = (1 - alpha) * self.MFA.Lambda.data[k] + (alpha * Lambda_proposed)
-                # DELETED: self.MFA.log_psi.data[k] = ... 
+                self.MFA.log_psi.data[k] = (1 - alpha) * self.MFA.log_psi.data[k] + (alpha * log_psi_proposed)
                 
-            print(f"-> Component {k} naturally drifted! (mu and Lambda updated)")
+            print(f"-> Component {k} naturally drifted! (mu, Lambda, Psi updated)")
             
             # Dynamically check actual repo size to prevent IndexError crashes
             actual_repo_size = self.component_repos[k].shape[0]
@@ -372,4 +339,5 @@ class MFA_OTFP:
             
         finally:
             # 7. Burn the local shelf to start collecting new drifters
+            # This is in a 'finally' block so the shelf is cleared even if the math above fails
             self.local_shelves[k] = []

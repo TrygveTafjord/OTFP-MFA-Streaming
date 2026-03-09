@@ -90,7 +90,7 @@ class MFA(nn.Module):
                 top_vals = vals[idx[:self.q]]
                 top_vecs = vecs[:, idx[:self.q]]
                 
-                top_vals = torch.clamp(top_vals, min=1e-1)
+                top_vals = torch.clamp(top_vals, min=1e-5)
                 self.Lambda.data[k] = top_vecs * torch.sqrt(top_vals).unsqueeze(0)
                 
                 # CHANGE 3: Update Psi for this specific component!
@@ -103,7 +103,7 @@ class MFA(nn.Module):
                 diag_recon = torch.diagonal(recon_cov)
                 
                 psi_update = diag_S_k - diag_recon
-                psi_update = torch.clamp(psi_update, min=1e-3) # Ensure strictly positive noise
+                psi_update = torch.clamp(psi_update, min=1e-5) # Ensure strictly positive noise
                 
                 self.log_psi.data[k] = torch.log(psi_update)
                 
