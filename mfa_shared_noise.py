@@ -1,0 +1,198 @@
+import torch
+import torch.nn as nn
+
+class MFA(nn.Module):
+    def __init__(self, n_components, n_channels, n_factors, tol=1e-4, max_iter=150, device='cpu'):
+        super().__init__()
+        self.K = n_components
+        self.D = n_channels
+        self.q = n_factors
+        self.tol = tol
+        self.max_iter = max_iter
+        self.device = device
+        
+        # Initialize parameters
+        self.log_pi = nn.Parameter(torch.log(torch.ones(self.K, device=self.device) / self.K))
+        # Initialize means centered around 0 but spread out
+        self.mu = nn.Parameter(torch.randn(self.K, self.D, device=self.device) * 0.1)
+        # Factor loadings (K, D, q)
+        self.Lambda = nn.Parameter(torch.randn(self.K, self.D, self.q, device=self.device) * 0.1)
+        # Log Diagonal noise is specific to each component (K, D)
+        # Remove the K dimension from the noise parameter
+        self.log_psi = nn.Parameter(torch.log(torch.ones(self.D, device=self.device) * 1e-2))        
+    
+    
+    def fit(self, X):
+        X = X.to(self.device)
+        N = X.shape[0]
+
+        prev_ll = -float('inf')
+        with torch.no_grad():
+            for i in range(self.max_iter):
+                # --- E-Step ---
+                log_resp, log_likelihood, _ = self.e_step(X)
+                current_ll = log_likelihood.mean()
+                
+                # --- M-Step ---
+                resp = torch.exp(log_resp) # (N, K)
+                self.m_step(X, resp)
+                
+                # Convergence check
+                diff = current_ll - prev_ll
+                if i > 0 and abs(diff) < self.tol:
+                    break
+                prev_ll = current_ll
+                
+            self.final_ll = prev_ll * N 
+        
+    def e_step(self, X):
+        """
+        Performs the Expectation step.
+        Returns:
+        -Normalized responsibilitiest P(x_i) = Sum(P(X_i | w_j) pi_j)
+        -Total log-likelihood h_ij = P(w_j|x_i) = (P(X_i | w_j) pi_j)/P(x_i)
+        -Raw geometric fits.
+        """
+        # 1. Get the pure physical/geometric fit (Shape: [N, K])
+        log_probs = self.compute_component_log_likelihoods(X)
+        
+        # 2. Add the Bayesian Prior (log_pi) to get unnormalized responsibilities
+        # self.log_pi has shape [K]. unsqueeze(0) makes it [1, K] for perfect broadcasting against [N, K]
+        log_resps = log_probs + self.log_pi.unsqueeze(0)
+        
+        # 3. Marginalize to find the total log-likelihood for the Purity Guardrail (Shape: [N])
+        log_likelihood = torch.logsumexp(log_resps, dim=1)
+        
+        # 4. Normalize to get the final posterior responsibilities (Shape: [N, K])
+        log_resp_norm = log_resps - log_likelihood.unsqueeze(1)
+        
+        # Return all three so OTFP can use geometry for drift, and EM can use resps for updates
+        return log_resp_norm, log_likelihood, log_probs
+
+    def m_step(self, X, resp):
+        N = X.shape[0]
+        Nk = resp.sum(dim=0) + 1e-10 
+
+        self.log_pi.data = torch.log(Nk / N)
+
+        # Create a tensor to accumulate the global noise update
+        global_psi_update = torch.zeros(self.D, device=self.device)
+
+        for k in range(self.K):
+            resp_k = resp[:, k].unsqueeze(1) 
+            mu_k = (resp_k * X).sum(dim=0) / Nk[k]
+            self.mu.data[k] = mu_k
+
+            diff = X - mu_k
+            S_k = (resp_k * diff).T @ diff / Nk[k]
+
+            try:
+                vals, vecs = torch.linalg.eigh(S_k)
+                idx = torch.argsort(vals, descending=True)
+                top_vals = vals[idx[:self.q]]
+                top_vecs = vecs[:, idx[:self.q]]
+
+                top_vals = torch.clamp(top_vals, min=1e-1)
+                self.Lambda.data[k] = top_vecs * torch.sqrt(top_vals).unsqueeze(0)
+
+                # Calculate the residual for this specific component
+                L_k_updated = self.Lambda.data[k]
+                recon_cov = L_k_updated @ L_k_updated.T
+
+                diag_S_k = torch.diagonal(S_k)
+                diag_recon = torch.diagonal(recon_cov)
+
+                psi_update_k = diag_S_k - diag_recon
+
+                # Weight the component's residual by its responsibility and add to global update
+                global_psi_update += (Nk[k] / N) * psi_update_k
+
+            except Exception as e:
+                pass 
+
+        # Apply the aggregated update once outside the loop
+        global_psi_update = torch.clamp(global_psi_update, min=1e-3) 
+        self.log_psi.data = torch.log(global_psi_update)
+    
+    def compute_component_log_likelihoods(self, X):
+        log_probs = []
+
+        # Extract the shared variance globally, outside the component loop
+        psi_shared = torch.exp(self.log_psi) + 1e-6
+
+        for k in range(self.K):
+            L_k = self.Lambda[k]
+
+            # Reconstruct the local covariance matrix using the shared noise
+            C_k = L_k @ L_k.T + torch.diag(psi_shared)
+
+            jitter = 1e-5 * torch.eye(self.D, device=self.device)
+            C_k = C_k + jitter
+            
+            try:
+                dist = torch.distributions.MultivariateNormal(self.mu[k], covariance_matrix=C_k)
+                log_prob = dist.log_prob(X)
+            except ValueError:
+                # Fallback for numerical instability (e.g., collapsed covariance)
+                log_prob = torch.ones(X.shape[0], device=self.device) * -1e20
+            
+            log_probs.append(log_prob)
+            
+        # Stack into a single tensor of shape (N, K)
+        return torch.stack(log_probs, dim=1)
+    
+    def initialize_parameters(self, X):
+        from sklearn.cluster import KMeans
+        X_cpu = X.cpu().numpy()
+        kmeans = KMeans(n_clusters=self.K, n_init=10, random_state=42)
+        labels = kmeans.fit_predict(X_cpu)
+        centroids = kmeans.cluster_centers_
+        
+        with torch.no_grad():
+            self.mu.data = torch.tensor(centroids, dtype=torch.float32).to(self.mu.device)
+            
+            # Calculate global variance across the entire initial dataset
+            var_global = torch.var(X, dim=0) + 1e-6
+            self.log_psi.data = torch.log(var_global)
+        
+    def add_component(self, new_mu, new_Lambda, new_weight):
+        """
+        Dynamically adds a new component to the Mixture Model.
+        """
+        with torch.no_grad():
+            # 1. Update mixing proportions (pi) so they sum to 1.0
+            current_pi = torch.exp(self.log_pi.data)
+            updated_pi = current_pi * (1.0 - new_weight)
+            
+            new_pi_tensor = torch.cat([updated_pi, torch.tensor([new_weight], device=self.device)])
+            new_log_pi = torch.log(new_pi_tensor + 1e-10)
+
+            # 2. Handle Tensor Shape Matching (Padding Lambda)
+            q_new = new_Lambda.shape[2]
+            
+            # Scenario A: New component has FEWER factors than the global model. Pad the new component.
+            if q_new < self.q:
+                pad_size = self.q - q_new
+                # F.pad with a 2-tuple pads only the last dimension (factors)
+                new_Lambda = torch.nn.functional.pad(new_Lambda, (0, pad_size))
+                
+            # Scenario B: New component has MORE factors. Pad the existing global model!
+            elif q_new > self.q:
+                pad_size = q_new - self.q
+                self.Lambda.data = torch.nn.functional.pad(self.Lambda.data, (0, pad_size))
+                self.q = q_new # Update the global factor count
+
+            # 3. Concatenate all parameters safely
+            self.log_pi = nn.Parameter(new_log_pi)
+            self.mu = nn.Parameter(torch.cat([self.mu.data, new_mu], dim=0))
+            self.Lambda = nn.Parameter(torch.cat([self.Lambda.data, new_Lambda], dim=0))
+            
+            # Note: We NO LONGER concatenate log_psi here. 
+            # The new component automatically uses the shared global self.log_psi!
+
+            # 4. Increment the internal component counter
+            self.K += 1
+            print(f"Model successfully updated! Total components (K) is now {self.K}")
+    
+    
+    

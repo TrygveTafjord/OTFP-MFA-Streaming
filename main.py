@@ -12,7 +12,7 @@ PERFORM_TIMING = True
 ## MODEL PARAMETERS
 NUM_CHANNELS = 120                          
 NUM_SIGMA = 4.0                 
-OUTLIER_UPDATE_TRESHOLD = 300               
+OUTLIER_UPDATE_TRESHOLD = 2000               
 Q_MAX = 8 
 
 # Data parameters 
