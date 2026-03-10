@@ -283,7 +283,7 @@ class MFA_OTFP:
             idx = torch.argsort(vals, descending=True)
             
             # Keep the global q dimension consistent
-            top_vals = torch.clamp(vals[idx[:self.MFA.q]], min=1e-6)
+            top_vals = torch.clamp(vals[idx[:self.MFA.q]], min=1e-3)
             top_vecs = vecs[:, idx[:self.MFA.q]]
             
             Lambda_proposed = top_vecs * torch.sqrt(top_vals).unsqueeze(0)
@@ -291,7 +291,7 @@ class MFA_OTFP:
             # Diagonal Noise Update (Psi)
             recon_cov = Lambda_proposed @ Lambda_proposed.T
             psi_proposed = torch.diagonal(S_k) - torch.diagonal(recon_cov)
-            psi_proposed = torch.clamp(psi_proposed, min=1e-6)
+            psi_proposed = torch.clamp(psi_proposed, min=1e-3)
             log_psi_proposed = torch.log(psi_proposed)
             
             # Smoothly blend the proposed geometry with the historical geometry

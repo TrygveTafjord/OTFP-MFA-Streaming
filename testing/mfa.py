@@ -21,7 +21,6 @@ class MFA(nn.Module):
         # Log Diagonal noise is specific to each component (K, D)
         self.log_psi = nn.Parameter(torch.log(torch.ones(self.K, self.D, device=self.device) * 1e-2))
 
-        # --- NEW: Sufficient Statistics Buffers ---
         # We use register_buffer so they are saved in the state_dict but aren't trainable parameters
         self.register_buffer('S0', torch.zeros(self.K, device=self.device))
         self.register_buffer('S1', torch.zeros(self.K, self.D, device=self.device))
