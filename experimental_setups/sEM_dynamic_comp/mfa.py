@@ -170,20 +170,41 @@ class MFA(nn.Module):
             Sigma_k = (self.S2[k] / (self.S0[k] + 1e-10)) - torch.outer(mu_k, mu_k)
             
             try:
-                # Weighted PCA for Factor Loadings
+                # Inside your try block in stepwise_em_update:
                 vals, vecs = torch.linalg.eigh(Sigma_k)
                 idx = torch.argsort(vals, descending=True)
-                top_vals = torch.clamp(vals[idx[:self.q]], min=1e-6)
-                top_vecs = vecs[:, idx[:self.q]]
+                sorted_vals = torch.clamp(vals[idx], min=1e-6)
+
+                # Calculate cumulative variance to dynamically find the needed 'q'
+                total_variance = torch.sum(sorted_vals)
+                cumulative_variance = torch.cumsum(sorted_vals, dim=0) / total_variance
+
+                # Find how many factors are needed to explain 95% of the variance
+                # cap it at a global maximum (e.g., self.q_max = 8) to prevent memory explosions
+                q_needed = torch.searchsorted(cumulative_variance, 0.95).item() + 1
+                q_dynamic = min(q_needed, self.q_max)
+
+                # Update the global model 'q' if this component needs more space than currently available
+                if q_dynamic > self.q:
+                    print(f"q_dynamic={q_dynamic}, ")
+                    pad_size = q_dynamic - self.q
+                    self.Lambda.data = torch.nn.functional.pad(self.Lambda.data, (0, pad_size))
+                    self.q = q_dynamic
                 
+
+                # Extract only the dynamic number of top vectors/values
+                top_vals = sorted_vals[:q_dynamic]
+                top_vecs = vecs[:, idx[:q_dynamic]]
+
+                # Calculate the new Lambda for this component
                 L_k_updated = top_vecs * torch.sqrt(top_vals).unsqueeze(0)
+
+                # Pad this specific component's Lambda with zeros if q_dynamic is less than the global self.q
+                if q_dynamic < self.q:
+                    pad_size = self.q - q_dynamic
+                    L_k_updated = torch.nn.functional.pad(L_k_updated, (0, pad_size))
+
                 self.Lambda.data[k] = L_k_updated
-                
-                # Update Psi (Diagonal noise)
-                recon_cov = L_k_updated @ L_k_updated.T
-                psi_update = torch.diagonal(Sigma_k) - torch.diagonal(recon_cov)
-                psi_update = torch.clamp(psi_update, min=1e-6)
-                self.log_psi.data[k] = torch.log(psi_update)
                 
             except Exception as e:
                 # Fallback if decomposition fails due to numerical instability
@@ -203,7 +224,7 @@ class MFA(nn.Module):
         
         for k in range(self.K):
             L_k = self.Lambda[k]                     # (D, q)
-            psi_k = torch.exp(self.log_psi[k]) + 1e-6 # (D,)
+            psi_k = torch.exp(self.log_psi[k]) + 1e-6# (D,)
             inv_psi = 1.0 / psi_k                    # (D,)
             
             # 1. Calculate the q x q inner matrix: M = I + Lambda^T * Psi^{-1} * Lambda
