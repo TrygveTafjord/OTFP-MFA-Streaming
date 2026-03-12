@@ -11,8 +11,8 @@ PERFORM_TIMING = True
 
 ## MODEL PARAMETERS
 NUM_CHANNELS = 120                          
-NUM_SIGMA = 4.0                 
-OUTLIER_UPDATE_TRESHOLD = 1000               
+NUM_SIGMA = 6.0                 
+OUTLIER_UPDATE_TRESHOLD = 2000               
 Q_MAX = 8 
 
 # Data parameters 
@@ -53,7 +53,7 @@ if __name__ == "__main__":
     # Start the producer thread
     producer_thread = Process(
         target=producer, 
-        args=(IMAGE_PATHS, queue, DATA_PRODUCT, 5000),
+        args=(IMAGE_PATHS, queue, DATA_PRODUCT, 2000),
         daemon=True
     )
     producer_thread.start()
