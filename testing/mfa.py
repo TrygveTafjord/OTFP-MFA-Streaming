@@ -1,8 +1,9 @@
 import torch
 import torch.nn as nn
+import math
 
 class MFA(nn.Module):
-    def __init__(self, n_components, n_channels, n_factors, tol=1e-4, max_iter=150, device='cpu', alpha=0.6):
+    def __init__(self, n_components, n_channels, n_factors, tol=1e-4, max_iter=150, device='cpu', alpha=0.5):
         super().__init__()
         self.K = n_components
         self.D = n_channels
@@ -21,6 +22,7 @@ class MFA(nn.Module):
         # Log Diagonal noise is specific to each component (K, D)
         self.log_psi = nn.Parameter(torch.log(torch.ones(self.K, self.D, device=self.device) * 1e-2))
 
+        # --- NEW: Sufficient Statistics Buffers ---
         # We use register_buffer so they are saved in the state_dict but aren't trainable parameters
         self.register_buffer('S0', torch.zeros(self.K, device=self.device))
         self.register_buffer('S1', torch.zeros(self.K, self.D, device=self.device))
@@ -189,37 +191,52 @@ class MFA(nn.Module):
     
     def compute_component_log_likelihoods(self, X):
         """
-        Calculates the pure structural/geometric fit of each pixel to each component.
+        Calculates the pure structural/geometric fit using the Woodbury Matrix Identity
+        to avoid O(D^3) inversion of the 120x120 covariance matrix.
         This calculates log P(x_i | w_j) and entirely ignores the global mixing weights (pi).
-        
-        Returns:
-            log_probs: Tensor of shape (N, K) containing the log-likelihoods.
         """
+        N, D = X.shape
         log_probs = []
         
+        # Constant term for the log pdf
+        c = D * math.log(2 * math.pi)
+        
         for k in range(self.K):
-            L_k = self.Lambda[k]
+            L_k = self.Lambda[k]                     # (D, q)
+            psi_k = torch.exp(self.log_psi[k]) + 1e-6 # (D,)
+            inv_psi = 1.0 / psi_k                    # (D,)
             
-            # Extract the specific variance for component K
-            psi_k = torch.exp(self.log_psi[k]) + 1e-6
+            # 1. Calculate the q x q inner matrix: M = I + Lambda^T * Psi^{-1} * Lambda
+            # Since Psi is diagonal, Psi^{-1} * Lambda is just row-wise multiplication
+            L_k_scaled = inv_psi.unsqueeze(1) * L_k  # (D, q)
+            M = torch.eye(self.q, device=self.device) + L_k.T @ L_k_scaled # (q, q)
             
-            # Reconstruct the local covariance matrix: C_k = Lambda @ Lambda.T + Psi_k
-            C_k = L_k @ L_k.T + torch.diag(psi_k)
+            # Invert the tiny q x q matrix
+            inv_M = torch.inverse(M)                 # (q, q)
             
-            # Robustness Jitter to prevent singular matrices
-            jitter = 1e-5 * torch.eye(self.D, device=self.device)
-            C_k = C_k + jitter
+            # 2. Calculate the Log Determinant using the determinant lemma:
+            # |C| = |Psi| * |M|
+            log_det_psi = torch.sum(torch.log(psi_k))
+            log_det_M = torch.logdet(M)
+            log_det_C = log_det_psi + log_det_M
             
-            try:
-                dist = torch.distributions.MultivariateNormal(self.mu[k], covariance_matrix=C_k)
-                log_prob = dist.log_prob(X)
-            except ValueError:
-                # Fallback for numerical instability (e.g., collapsed covariance)
-                log_prob = torch.ones(X.shape[0], device=self.device) * -1e20
+            # 3. Calculate Mahalanobis distance: (x-mu)^T C^{-1} (x-mu)
+            diff = X - self.mu[k]                    # (N, D)
             
+            # Term 1: diff^T * Psi^{-1} * diff
+            term1 = torch.sum((diff ** 2) * inv_psi, dim=1) # (N,)
+            
+            # Term 2: diff^T * Psi^{-1} * Lambda * M^{-1} * Lambda^T * Psi^{-1} * diff
+            # Let proj = diff * Psi^{-1} * Lambda
+            proj = diff @ L_k_scaled                 # (N, q)
+            term2 = torch.sum((proj @ inv_M) * proj, dim=1) # (N,)
+            
+            mahalanobis = term1 - term2              # (N,)
+            
+            # 4. Final Log PDF
+            log_prob = -0.5 * (c + log_det_C + mahalanobis)
             log_probs.append(log_prob)
             
-        # Stack into a single tensor of shape (N, K)
         return torch.stack(log_probs, dim=1)
     
     def initialize_parameters(self, X):
@@ -310,6 +327,4 @@ class MFA(nn.Module):
             self.update_counts = torch.ones(self.K, device=self.device)
             
         print(f"Sufficient statistics initialized. Model total mass (S0 sum): {self.S0.sum().item():.2f}")
-    
-    
     

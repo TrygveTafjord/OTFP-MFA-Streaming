@@ -48,7 +48,7 @@ class MFA(nn.Module):
         Performs the Expectation step.
         Returns:
         -Normalized responsibilitiest P(x_i) = Sum(P(X_i | w_j) pi_j)
-        -Total log-likelihood h_ij = P(w_j|x_i) = (P(X_i | w_j) pi_j)/P(x_i)
+        -Total log-likelihood (log_resp_norm) h_ij = P(w_j|x_i) = (P(X_i | w_j) pi_j)/P(x_i)
         -Raw geometric fits.
         """
         # 1. Get the pure physical/geometric fit (Shape: [N, K])

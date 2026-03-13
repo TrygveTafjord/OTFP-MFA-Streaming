@@ -4,14 +4,14 @@ import torch
 import os
 from multiprocessing import Queue, Process
 from data_fetcher import producer, fetch_init_data, DataProduct
-from experimental_setups.sEM_dynamic_comp.otfp import MFA_OTFP
-
+from experimental_setups.sEM.otfp import MFA_OTFP
+#from otfp import MFA_OTFP
 
 PERFORM_TIMING = True
 
 ## MODEL PARAMETERS
 NUM_CHANNELS = 120                          
-NUM_SIGMA = 6.0                 
+NUM_SIGMA = 8.0                 
 OUTLIER_UPDATE_TRESHOLD = 2000               
 Q_MAX = 8 
 
