@@ -51,8 +51,6 @@ class MFA_OTFP:
         median_ll = torch.median(log_likelihood)
         mad_ll = torch.median(torch.abs(log_likelihood - median_ll))
         robust_std_ll = 1.4826 * mad_ll
-
-        
         
         self.num_sigma = 6.0 
         self.global_threshold = (median_ll - (self.num_sigma * robust_std_ll)).item()

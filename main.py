@@ -4,8 +4,7 @@ import torch
 import os
 from multiprocessing import Queue, Process
 from data_fetcher import producer, fetch_init_data, DataProduct
-from experimental_setups.sEM.otfp import MFA_OTFP
-#from otfp import MFA_OTFP
+from experimental_setups.sEM_v3.otfp import MFA_OTFP
 
 PERFORM_TIMING = True
 

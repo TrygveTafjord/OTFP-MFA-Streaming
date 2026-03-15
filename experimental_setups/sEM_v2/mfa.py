@@ -97,42 +97,27 @@ class MFA(nn.Module):
                 vals, vecs = torch.linalg.eigh(S_k)
                 idx = torch.argsort(vals, descending=True)
                 
-                # Sort the values and vectors
-                sorted_vals = vals[idx]
-                sorted_vecs = vecs[:, idx]
-                
-                # ==========================================================
-                # THE ELASTIC MASKING LOGIC
-                # ==========================================================
-                # 1. Calculate the current variance structure of the component
-                total_variance = torch.sum(torch.clamp(sorted_vals, min=0.0))
-                
+                # === 1. DYNAMIC LOCAL DIMENSIONALITY UPDATE ===
+                # This was missing! It recalculates how many factors are needed based on the streaming data.
+                total_variance = torch.sum(torch.clamp(vals, min=0.0))
                 if total_variance > 0:
-                    cumulative_variance = torch.cumsum(torch.clamp(sorted_vals, min=0.0), dim=0) / total_variance
-                    
-                    # 2. Find how many factors are currently needed to explain 95% of variance
+                    cumulative_variance = torch.cumsum(torch.clamp(vals[idx], min=0.0), dim=0) / total_variance
                     needed_q = torch.searchsorted(cumulative_variance, 0.95).item() + 1
-                    
-                    # 3. Cap it at the global hardware limit (self.q)
                     needed_q = min(needed_q, self.q)
-                    
-                    # Optional: Print when a component actively changes its dimensionality online
-                    if needed_q != self.q_k.data[k]:
-                        print(f"Streaming Drift: Component {k} adapted dimensionality from {int(self.q_k.data[k].item())} to {needed_q}")
-                        
-                    # 4. Update the component's specific tracker
-                    self.q_k.data[k] = needed_q
+                    self.q_k.data[k] = needed_q # Update the tracker!
+                # ============================================
+
+                top_vals = torch.clamp(vals[idx[:self.q]], min=1e-6)
+                top_vecs = vecs[:, idx[:self.q]]
                 
-                local_q = int(self.q_k.data[k].item())
-                # ==========================================================
-                
-                top_vals = torch.clamp(sorted_vals[:self.q], min=1e-6)
-                top_vecs = sorted_vecs[:, :self.q]
-                
-                # Apply the mask based on the newly calculated local_q
+                # === 2. THE NEW MASKING LOGIC ===
+                local_q = int(self.q_k.data[k].item()) 
                 if local_q < self.q:
+                    # Zero out the unused factors
                     top_vecs[:, local_q:] = 0.0
+                    # Set their variance contribution to the noise floor
                     top_vals[local_q:] = 1e-6 
+                # ============================================
                 
                 L_k_updated = top_vecs * torch.sqrt(top_vals).unsqueeze(0)
                 self.Lambda.data[k] = L_k_updated
@@ -156,7 +141,7 @@ class MFA(nn.Module):
         
         for k in range(self.K):
             k_count = self.update_counts[k].item()
-            eta = (k_count + 2) ** (-self.alpha)
+            eta = (k_count + 50) ** (-self.alpha)
 
             # If the component is missing from this batch, decay its history evenly
             if s0_batch[k] < 1e-6:
