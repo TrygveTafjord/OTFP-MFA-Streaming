@@ -96,34 +96,18 @@ class MFA(nn.Module):
             try:
                 vals, vecs = torch.linalg.eigh(S_k)
                 idx = torch.argsort(vals, descending=True)
-                
-                # === NEW: DYNAMIC LOCAL DIMENSIONALITY UPDATE ===
-                total_variance = torch.sum(torch.clamp(vals, min=0.0))
-                if total_variance > 0:
-                    cumulative_variance = torch.cumsum(torch.clamp(vals[idx], min=0.0), dim=0) / total_variance
-                    needed_q = torch.searchsorted(cumulative_variance, 0.95).item() + 1
-                    needed_q = min(needed_q, self.q)
-                    self.q_k.data[k] = needed_q # Update the tracker!
-                # ================================================
-
-                top_vals = torch.clamp(vals[idx[:self.q]], min=1e-6)
+                top_vals = vals[idx[:self.q]]
                 top_vecs = vecs[:, idx[:self.q]]
                 
-                # === NEW: THE ELASTIC MASKING LOGIC ===
-                local_q = int(self.q_k.data[k].item()) 
-                if local_q < self.q:
-                    # Zero out the unused factors
-                    top_vecs[:, local_q:] = 0.0
-                    # Set their variance contribution to the noise floor
-                    top_vals[local_q:] = 1e-6 
-                # ======================================
+                top_vals = torch.clamp(top_vals, min=1e-6)
+                self.Lambda.data[k] = top_vecs * torch.sqrt(top_vals).unsqueeze(0)
                 
-                L_k_updated = top_vecs * torch.sqrt(top_vals).unsqueeze(0)
-                self.Lambda.data[k] = L_k_updated
-                
-                # Update Psi for this specific component!
+                # CHANGE 3: Update Psi for this specific component!
+                # Psi_k is the diagonal of the residual covariance: diag(S_k - Lambda_k * Lambda_k^T)
+                L_k_updated = self.Lambda.data[k]
                 recon_cov = L_k_updated @ L_k_updated.T
                 
+                # Extract diagonals for the update
                 diag_S_k = torch.diagonal(S_k)
                 diag_recon = torch.diagonal(recon_cov)
                 
