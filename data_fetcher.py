@@ -2,7 +2,7 @@ from hypso import Hypso
 import numpy as np
 from enum import Enum
 import torch
-from queue import Queue
+from multiprocessing import Queue
 
 
 class DataProduct(Enum):
@@ -44,8 +44,8 @@ def producer(file_list : list[str], data_queue : Queue, data_product : DataProdu
 
         for i in range(0, pixels_2d.shape[0], batch_size):
             batch = pixels_2d[i:i+batch_size]
-            batch_tensor = torch.tensor(batch, dtype=torch.float32)
-            data_queue.put(batch_tensor)
+            #batch_tensor = torch.tensor(batch, dtype=torch.float32)
+            data_queue.put(batch)
                 
     # Send a "done" signal
     data_queue.put("FINISHED")
@@ -64,7 +64,7 @@ def fetch_init_data(file_list : list[str], n_target_samples : int, data_product 
 
     len_file_list = len(file_list)
     # We read from max 30 files to reduce computation time during development, but this can be adjusted as needed.
-    MAX_FILES_TO_READ = 20
+    MAX_FILES_TO_READ = 1
     num_files = min(len_file_list, MAX_FILES_TO_READ)
     file_list = file_list[:num_files] 
     samples_per_file = n_target_samples // num_files
