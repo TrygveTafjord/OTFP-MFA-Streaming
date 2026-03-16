@@ -217,7 +217,6 @@ class MFA_OTFP:
                         self.local_shelves[new_comp_idx] = []
                         self.component_repos[new_comp_idx] = X[top_indices].clone()
                         
-                        # --- FIX: INITIALIZE THE LOCAL THRESHOLD FOR THE NEW COMPONENT ---
                         self.local_thresholds = torch.cat([self.local_thresholds, torch.tensor([0.0], device=self.device)])
                         new_geom_fits = log_probs_new[top_indices, new_comp_idx]
                         med_p = torch.median(new_geom_fits)

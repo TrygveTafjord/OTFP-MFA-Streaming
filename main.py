@@ -46,7 +46,6 @@ if __name__ == "__main__":
     torch.manual_seed(seed)
     
     # Create a thread-safe queue, could calcuate maxsize based on data-info, for now just set it arbitrarirly
-
     queue = Queue(maxsize=200) 
 
     # Start the producer thread
@@ -83,6 +82,29 @@ if __name__ == "__main__":
     finally:
         # This will run whether the loop finishes or is interrupted
         print("\n--- Final Model Statistics ---")
+        print("="*55)
+        print(" MFA SYSTEM STATE")
+        print("="*55)
+
+        # Model Architecture
+        print(f"\n[MFA ARCHITECTURE]")
+        print(f"Channels (D)                : {MFA_OTFP_model.MFA.D}")
+        print(f"Latent Factors (q)          : {MFA_OTFP_model.MFA.q}")
+        print(f"Total Components (K)        : {MFA_OTFP_model.MFA.K}")
+
+        print(f"\n[COMPONENT BREAKDOWN]")
+        print("-" * 55)
+
+        # Convert tensors to CPU numpy arrays for easy string formatting
+        pi_weights = torch.exp(MFA_OTFP_model.MFA.log_pi).detach().cpu().numpy()
+        s0_mass = MFA_OTFP_model.MFA.S0.detach().cpu().numpy()
+        updates = MFA_OTFP_model.MFA.update_counts.detach().cpu().numpy()
+    
+    for k in range(MFA_OTFP_model.MFA.K):
+        print(f"  ▶ Component {k}:")
+        print(f"    ├─ Mixing Weight (π)       : {pi_weights[k]:.2%}")
+        print(f"    ├─ Effective Pixel Mass    : {s0_mass[k]:,.1f} (from S0)")
+        print(f"    └─ Stepwise EM Updates     : {int(updates[k])}\n")
         print(f"Total samples seen by model: {MFA_OTFP_model.n_samples_seen}")
         print(f"Total number of model cmponents: {MFA_OTFP_model.MFA.K}")
         # You can add MFA-specific stats here later, like final K and q!
