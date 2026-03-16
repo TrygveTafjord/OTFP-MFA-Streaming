@@ -4,7 +4,8 @@ import torch
 import os
 from multiprocessing import Queue, Process
 from data_fetcher import producer, fetch_init_data, DataProduct
-from experimental_setups.sEM_v4.otfp import MFA_OTFP
+#from experimental_setups.sEM_v5.otfp import MFA_OTFP
+from otfp import MFA_OTFP
 
 PERFORM_TIMING = True
 
@@ -100,15 +101,16 @@ if __name__ == "__main__":
         s0_mass = MFA_OTFP_model.MFA.S0.detach().cpu().numpy()
         updates = MFA_OTFP_model.MFA.update_counts.detach().cpu().numpy()
     
-    for k in range(MFA_OTFP_model.MFA.K):
-        print(f"  ▶ Component {k}:")
-        print(f"    ├─ Mixing Weight (π)       : {pi_weights[k]:.2%}")
-        print(f"    ├─ Effective Pixel Mass    : {s0_mass[k]:,.1f} (from S0)")
-        print(f"    └─ Stepwise EM Updates     : {int(updates[k])}\n")
+        for k in range(MFA_OTFP_model.MFA.K):
+            print(f"  ▶ Component {k}:")
+            print(f"    ├─ Mixing Weight (π)       : {pi_weights[k]:.2%}")
+            print(f"    ├─ Effective Pixel Mass    : {s0_mass[k]:,.1f} (from S0)")
+            print(f"    └─ Stepwise EM Updates     : {int(updates[k])}\n")
+
         print(f"Total samples seen by model: {MFA_OTFP_model.n_samples_seen}")
         print(f"Total number of model cmponents: {MFA_OTFP_model.MFA.K}")
-        # You can add MFA-specific stats here later, like final K and q!
-        
+            # You can add MFA-specific stats here later, like final K and q!
+
         if PERFORM_TIMING:
             print(f"Total processing time: {time.perf_counter() - start_time:.2f} seconds")
                 

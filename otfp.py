@@ -1,5 +1,5 @@
 import torch
-from mfa import MFA
+from experimental_setups.sEM_v4.mfa import MFA
 
 class MFA_OTFP:
     def __init__(self, init_data: torch.Tensor, n_channels: int, outlier_significance: float, device: str, outlier_update_treshold: int, L2_normalization: bool = True, q_max: int = 5):
@@ -29,11 +29,6 @@ class MFA_OTFP:
         # Memory buffers
         self.global_outliers_shelf = torch.empty((self.outlier_update_treshold, n_channels), device=self.device, dtype=torch.float32) 
         self.num_outliers_on_shelf = 0
-        
-        # Local shelves for drifting known materials
-        self.local_shelf_counts = torch.zeros(self.MFA.K, dtype=torch.long, device=self.device) 
-        self.component_pixel_counts = torch.zeros(self.MFA.K, dtype=torch.long, device=self.device) 
-        self.local_shelves = {k: [] for k in range(self.MFA.K)} 
 
         print(f"Finished setup of OTFP-MFA: K={self.MFA.K}, q={self.MFA.q}")
 
@@ -55,7 +50,7 @@ class MFA_OTFP:
         self.num_sigma = 6.0 
         self.global_threshold = (median_ll - (self.num_sigma * robust_std_ll)).item()
         
-        # 2. --- Extract Anchors & Set Local Thresholds ---
+        # Extract Anchors & Set Local Thresholds
         self.repo_size = 360
         self.component_repos = {}
         self.local_thresholds = torch.zeros(self.MFA.K, device=self.device)
@@ -71,16 +66,8 @@ class MFA_OTFP:
                 num_to_take = min(self.repo_size, len(X_k))
                 
                 # Get the absolute best-fitting pixels
-                top_values, top_indices = torch.topk(probs_k, num_to_take)
+                _, top_indices = torch.topk(probs_k, num_to_take)
                 self.component_repos[k] = X_k[top_indices].clone()
-                
-                # Set the local sigma threshold for THIS specific component
-                med_p = torch.median(top_values)
-                mad_p = torch.median(torch.abs(top_values - med_p))
-                local_std = 1.4826 * mad_p
-                
-                # If a pixel's fit drops below this, it is a shadow/drifter
-                self.local_thresholds[k] = (med_p - (3.0 * local_std)).item()
                 
             else:
                 self.component_repos[k] = torch.empty((0, self.n_channels), device=self.device)
@@ -212,18 +199,7 @@ class MFA_OTFP:
                         _, top_indices = torch.topk(new_comp_probs, num_to_take)
                         
                         # 4. Update your trackers and repos using the correct index
-                        self.component_pixel_counts = torch.cat([self.component_pixel_counts, torch.tensor([0], device=self.device)])
-                        self.local_shelf_counts = torch.cat([self.local_shelf_counts, torch.tensor([0], device=self.device)])
-                        self.local_shelves[new_comp_idx] = []
                         self.component_repos[new_comp_idx] = X[top_indices].clone()
-                        
-                        self.local_thresholds = torch.cat([self.local_thresholds, torch.tensor([0.0], device=self.device)])
-                        new_geom_fits = log_probs_new[top_indices, new_comp_idx]
-                        med_p = torch.median(new_geom_fits)
-                        mad_p = torch.median(torch.abs(new_geom_fits - med_p))
-                        local_std = 1.4826 * mad_p + 1e-4
-                        self.local_thresholds[new_comp_idx] = (med_p - (3.0 * local_std)).item()
-                        # -----------------------------------------------------------------
 
                         # 5. Concatenate all anchor pixels across all components
                         repo_tensors = [self.component_repos[i] for i in range(self.MFA.K)]
@@ -257,87 +233,3 @@ class MFA_OTFP:
                     
         return
 
-    
-    def _drift_component(self, k, alpha=0.05):
-        """
-        Performs a localized, momentum-based M-Step update for a single component.
-        Blends the stable 'Anchor' repository with the new 'Drifting' pixels, 
-        then recalibrates both the local and global anomaly thresholds.
-        """
-        # 1. Combine the stable history with the changing present
-        drifters = torch.cat(self.local_shelves[k], dim=0)
-        anchors = self.component_repos[k]
-        
-        X_combined = torch.cat([anchors, drifters], dim=0)
-        N_comb = X_combined.shape[0]
-        
-        # 2. Localized M-Step (Responsibility = 1.0 for this specific component)
-        mu_proposed = X_combined.mean(dim=0)
-        
-        diff = X_combined - mu_proposed
-        S_k = (diff.T @ diff) / N_comb  # Local Covariance Matrix
-        
-        try:
-            # Weighted PCA for the new Factor Loadings
-            vals, vecs = torch.linalg.eigh(S_k)
-            idx = torch.argsort(vals, descending=True)
-            
-            # Keep the global q dimension consistent
-            top_vals = torch.clamp(vals[idx[:self.MFA.q]], min=1e-3)
-            top_vecs = vecs[:, idx[:self.MFA.q]]
-            
-            Lambda_proposed = top_vecs * torch.sqrt(top_vals).unsqueeze(0)
-            
-            # Diagonal Noise Update (Psi)
-            recon_cov = Lambda_proposed @ Lambda_proposed.T
-            psi_proposed = torch.diagonal(S_k) - torch.diagonal(recon_cov)
-            psi_proposed = torch.clamp(psi_proposed, min=1e-3)
-            log_psi_proposed = torch.log(psi_proposed)
-            
-            # Smoothly blend the proposed geometry with the historical geometry
-            with torch.no_grad():
-                self.MFA.mu.data[k] = (1 - alpha) * self.MFA.mu.data[k] + (alpha * mu_proposed)
-                self.MFA.Lambda.data[k] = (1 - alpha) * self.MFA.Lambda.data[k] + (alpha * Lambda_proposed)
-                self.MFA.log_psi.data[k] = (1 - alpha) * self.MFA.log_psi.data[k] + (alpha * log_psi_proposed)
-                
-            print(f"-> Component {k} naturally drifted! (mu, Lambda, Psi updated)")
-            
-            # Dynamically check actual repo size to prevent IndexError crashes
-            actual_repo_size = self.component_repos[k].shape[0]
-            num_to_replace = int(actual_repo_size * alpha)
-            
-            if num_to_replace > 0:
-                replace_indices = torch.randperm(actual_repo_size)[:num_to_replace]
-                drifter_indices = torch.randperm(drifters.shape[0])[:num_to_replace]
-                self.component_repos[k][replace_indices] = drifters[drifter_indices].clone()
-
-            # Calculate the new "normal" boundary for this component
-            with torch.no_grad():
-                new_geom_fits = self.MFA.compute_component_log_likelihoods(self.component_repos[k])[:, k]
-                
-                med_p = torch.median(new_geom_fits)
-                mad_p = torch.median(torch.abs(new_geom_fits - med_p))
-                local_std = 1.4826 * mad_p
-                
-                self.local_thresholds[k] = (med_p - (3.0 * local_std)).item()
-
-            # The world just shifted, evaluate combined anchors to find the new global baseline
-            with torch.no_grad():
-                repo_tensors = [self.component_repos[i] for i in range(self.MFA.K)]
-                total_dataset = torch.cat(repo_tensors, dim=0)
-                
-                _, global_ll, _ = self.MFA.e_step(total_dataset)
-                
-                median_ll = torch.median(global_ll)
-                mad_ll = torch.median(torch.abs(global_ll - median_ll))
-                robust_std_ll = 1.4826 * mad_ll
-                
-                self.global_threshold = (median_ll - (self.num_sigma * robust_std_ll)).item()
-
-        except Exception as e:
-            print(f"Warning: Drift failed for component {k} due to numerical instability: {e}")
-            
-        finally:
-            # 7. Burn the local shelf to start collecting new drifters
-            # This is in a 'finally' block so the shelf is cleared even if the math above fails
-            self.local_shelves[k] = []
