@@ -51,7 +51,7 @@ class MFA_OTFP:
         self.global_threshold = (median_ll - (self.num_sigma * robust_std_ll)).item()
         
         # Extract Anchors & Set Local Thresholds
-        self.repo_size = 360
+        self.repo_size = 200
         self.component_repos = {}
         self.local_thresholds = torch.zeros(self.MFA.K, device=self.device)
         

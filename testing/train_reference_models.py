@@ -20,7 +20,7 @@ data_dir = glob.glob(f'./data/training_{data_product.value}/*.nc')
 print(f"Found {len(data_dir)} files.")
 
 
-target_total_samples = 200000
+target_total_samples = 2000000
 
 start_time = time.perf_counter()
 
