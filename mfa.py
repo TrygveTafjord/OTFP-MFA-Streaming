@@ -264,19 +264,10 @@ class MFA(nn.Module):
             self.Lambda = nn.Parameter(torch.cat([self.Lambda.data, new_Lambda], dim=0))
             self.log_psi = nn.Parameter(torch.cat([self.log_psi.data, new_log_psi], dim=0))
 
-           # --- Translate DxD external input into Latent Statistics ---
+            # --- Translate DxD external input into Latent Statistics ---
             S0_in = new_S0[0]
             S1_in = new_S1[0]
-            S2_in = new_S2[0] # D x D 
-
-            # FIX: We must normalize these inputs so they match the scale 
-            # of our global moving average buffers (which are expectations per pixel).
-            # If S0_in is already normalized (e.g., <= 1.0), this division is safe.
-            # If S0_in is an unnormalized sum (e.g., 2000), this converts it.
-            N_shelf = S0_in.clone() 
-            S0_norm = S0_in / N_shelf  # Will equal 1.0 (100% of its own shelf mass)
-            S1_norm = S1_in / N_shelf
-            S2_norm = S2_in / N_shelf
+            S2_in = new_S2[0] # D x D (Will be discarded after translation)
 
             L = new_Lambda[0] 
             psi = torch.exp(new_log_psi[0]) + 1e-6
@@ -286,26 +277,28 @@ class MFA(nn.Module):
             M_inv = torch.inverse(M)
             A = M_inv @ L_scaled.T 
 
-            # Use the normalized values for the translations
-            mu_in = S1_norm / S0_norm 
+            mu_in = S1_in / S0_in
 
-            new_SX = (A @ (S1_norm - S0_norm * mu_in)).unsqueeze(0)
-            new_SYX = ((S2_norm - torch.outer(S1_norm, mu_in)) @ A.T).unsqueeze(0)
-            cov_Y = S2_norm - torch.outer(S1_norm, mu_in) - torch.outer(mu_in, S1_norm) + S0_norm * torch.outer(mu_in, mu_in)
-            new_SXX = (S0_norm * M_inv + A @ cov_Y @ A.T).unsqueeze(0)
-            new_SY2 = torch.diagonal(S2_norm).unsqueeze(0)
+            # Translate SX: E[x] = A(y - mu) => sum(E[x]) = A(S1 - S0*mu)
+            new_SX = (A @ (S1_in - S0_in * mu_in)).unsqueeze(0)
 
-            # NOTE: For S0, we append S0_norm (which is 1.0). But when calculating pi, 
-            # we want the initial weight to be proportional. In an online setting, 
-            # it is safe to initialize a new component's S0 as the average of the others.
-            avg_S0 = self.S0.mean().unsqueeze(0) if self.K > 0 else torch.tensor([1.0], device=self.device)
+            # Translate SYX: sum(y * E[x]^T) = (S2 - outer(S1, mu)) @ A^T
+            new_SYX = ((S2_in - torch.outer(S1_in, mu_in)) @ A.T).unsqueeze(0)
 
-            self.S0 = torch.cat([self.S0, avg_S0])
-            self.S1 = torch.cat([self.S1, S1_norm.unsqueeze(0) * avg_S0]) # Scale S1 to match new S0
-            self.SX = torch.cat([self.SX, new_SX * avg_S0])
-            self.SXX = torch.cat([self.SXX, new_SXX * avg_S0])
-            self.SYX = torch.cat([self.SYX, new_SYX * avg_S0])
-            self.SY2 = torch.cat([self.SY2, new_SY2 * avg_S0])
+            # Translate SXX: S0*M_inv + A * cov_Y * A^T
+            cov_Y = S2_in - torch.outer(S1_in, mu_in) - torch.outer(mu_in, S1_in) + S0_in * torch.outer(mu_in, mu_in)
+            new_SXX = (S0_in * M_inv + A @ cov_Y @ A.T).unsqueeze(0)
+
+            # Translate SY2: Just the diagonal of S2
+            new_SY2 = torch.diagonal(S2_in).unsqueeze(0)
+
+            # Append pure latent statistics
+            self.S0 = torch.cat([self.S0, new_S0])
+            self.S1 = torch.cat([self.S1, new_S1])
+            self.SX = torch.cat([self.SX, new_SX])
+            self.SXX = torch.cat([self.SXX, new_SXX])
+            self.SYX = torch.cat([self.SYX, new_SYX])
+            self.SY2 = torch.cat([self.SY2, new_SY2])
             
             self.update_counts = torch.cat([self.update_counts, torch.tensor([1.0], device=self.device)])
             self.log_pi = nn.Parameter(torch.log(self.S0 / self.S0.sum() + 1e-10))

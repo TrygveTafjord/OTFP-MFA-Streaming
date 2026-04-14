@@ -3,7 +3,7 @@ import torch.nn as nn
 import math
 
 class MFA(nn.Module):
-    def __init__(self, n_components, n_channels, n_factors, tol=1e-4, max_iter=150, device='cpu', alpha=0.5):
+    def __init__(self, n_components, n_channels, n_factors, tol=1e-4, max_iter=150, device='cpu', alpha=0.6):
         super().__init__()
         self.K = n_components
         self.D = n_channels
@@ -15,18 +15,17 @@ class MFA(nn.Module):
         
         # Initialize parameters
         self.log_pi = nn.Parameter(torch.log(torch.ones(self.K, device=self.device) / self.K))
-        # Initialize means centered around 0 but spread out
         self.mu = nn.Parameter(torch.randn(self.K, self.D, device=self.device) * 0.1)
-        # Factor loadings (K, D, q)
         self.Lambda = nn.Parameter(torch.randn(self.K, self.D, self.q, device=self.device) * 0.1)
-        # Log Diagonal noise is specific to each component (K, D)
         self.log_psi = nn.Parameter(torch.log(torch.ones(self.K, self.D, device=self.device) * 1e-2))
 
-        # --- NEW: Sufficient Statistics Buffers ---
-        # We use register_buffer so they are saved in the state_dict but aren't trainable parameters
-        self.register_buffer('S0', torch.zeros(self.K, device=self.device))
-        self.register_buffer('S1', torch.zeros(self.K, self.D, device=self.device))
-        self.register_buffer('S2', torch.zeros(self.K, self.D, self.D, device=self.device))
+        self.register_buffer('S0', torch.zeros(self.K, device=self.device))                  # 0th order (Scalar)
+        self.register_buffer('S1', torch.zeros(self.K, self.D, device=self.device))          # 1st order Y (D)
+        self.register_buffer('SX', torch.zeros(self.K, self.q, device=self.device))          # 1st order Latent X (q)
+        self.register_buffer('SXX', torch.zeros(self.K, self.q, self.q, device=self.device)) # 2nd order Latent XX (q x q)
+        self.register_buffer('SYX', torch.zeros(self.K, self.D, self.q, device=self.device)) # Cross-order YX (D x q)
+        self.register_buffer('SY2', torch.zeros(self.K, self.D, device=self.device))         # Diagonal of YY (D)
+        
         self.register_buffer('update_counts', torch.zeros(self.K, device=self.device))
         
     def fit(self, X):
@@ -36,15 +35,12 @@ class MFA(nn.Module):
         prev_ll = -float('inf')
         with torch.no_grad():
             for i in range(self.max_iter):
-                # --- E-Step ---
                 log_resp, log_likelihood, _ = self.e_step(X)
                 current_ll = log_likelihood.mean()
                 
-                # --- M-Step ---
                 resp = torch.exp(log_resp) # (N, K)
                 self.m_step(X, resp)
                 
-                # Convergence check
                 diff = current_ll - prev_ll
                 if i > 0 and abs(diff) < self.tol:
                     break
@@ -53,198 +49,177 @@ class MFA(nn.Module):
             self.final_ll = prev_ll * N 
         
     def e_step(self, X):
-        """
-        Performs the Expectation step.
-        Returns:
-        -Normalized responsibilitiest P(x_i) = Sum(P(X_i | w_j) pi_j)
-        -Total log-likelihood h_ij = P(w_j|x_i) = (P(X_i | w_j) pi_j)/P(x_i)
-        -Raw geometric fits.
-        """
-        # 1. Get the pure physical/geometric fit (Shape: [N, K])
         log_probs = self.compute_component_log_likelihoods(X)
-        
-        # 2. Add the Bayesian Prior (log_pi) to get unnormalized responsibilities
-        # self.log_pi has shape [K]. unsqueeze(0) makes it [1, K] for perfect broadcasting against [N, K]
         log_resps = log_probs + self.log_pi.unsqueeze(0)
-        
-        # 3. Marginalize to find the total log-likelihood for the Purity Guardrail (Shape: [N])
         log_likelihood = torch.logsumexp(log_resps, dim=1)
-        
-        # 4. Normalize to get the final posterior responsibilities (Shape: [N, K])
         log_resp_norm = log_resps - log_likelihood.unsqueeze(1)
-        
-        # Return all three so OTFP can use geometry for drift, and EM can use resps for updates
         return log_resp_norm, log_likelihood, log_probs
 
     def m_step(self, X, resp):
+        """
+        Batch M-Step. Refactored to use the exact sufficient statistics math 
+        instead of the unstable PCA approximation.
+        """
         N = X.shape[0]
         Nk = resp.sum(dim=0) + 1e-10 
-        
-        # 1. Update Pi
         self.log_pi.data = torch.log(Nk / N)
         
-        # 2. Update Mu
         for k in range(self.K):
-            resp_k = resp[:, k].unsqueeze(1) # (N, 1)
-            mu_k = (resp_k * X).sum(dim=0) / Nk[k]
-            self.mu.data[k] = mu_k
+            resp_k = resp[:, k:k+1] 
             
-            # 3. Update Lambda (Approximation via Weighted PCA)
-            diff = X - mu_k
-            S_k = (resp_k * diff).T @ diff / Nk[k]
+            # 1. Woodbury Identity Latent Moments [cite: 706, 728]
+            L_k = self.Lambda[k]                     
+            psi_k = torch.exp(self.log_psi[k]) + 1e-6 
+            inv_psi = 1.0 / psi_k                    
             
-            try:
-                vals, vecs = torch.linalg.eigh(S_k)
-                idx = torch.argsort(vals, descending=True)
-                top_vals = vals[idx[:self.q]]
-                top_vecs = vecs[:, idx[:self.q]]
-                
-                top_vals = torch.clamp(top_vals, min=1e-6)
-                self.Lambda.data[k] = top_vecs * torch.sqrt(top_vals).unsqueeze(0)
-                
-                # CHANGE 3: Update Psi for this specific component!
-                # Psi_k is the diagonal of the residual covariance: diag(S_k - Lambda_k * Lambda_k^T)
-                L_k_updated = self.Lambda.data[k]
-                recon_cov = L_k_updated @ L_k_updated.T
-                
-                # Extract diagonals for the update
-                diag_S_k = torch.diagonal(S_k)
-                diag_recon = torch.diagonal(recon_cov)
-                
-                psi_update = diag_S_k - diag_recon
-                psi_update = torch.clamp(psi_update, min=1e-6) # Ensure strictly positive noise
-                
-                self.log_psi.data[k] = torch.log(psi_update)
-                
-            except Exception as e:
-                pass # Keep old Lambda and Psi if decomposition fails
+            L_k_scaled = inv_psi.unsqueeze(1) * L_k  
+            M = torch.eye(self.q, device=self.device) + L_k.T @ L_k_scaled 
+            M_inv = torch.inverse(M)                 
+            
+            A_k = M_inv @ L_k_scaled.T               
+            diff = X - self.mu[k]                    
+            
+            # E[x] and V[x] computation based on Eq 22 and 23
+            E_k = diff @ A_k.T                       
+            
+            # 2. Local Batch Statistics
+            S0_k = Nk[k]
+            S1_k = (resp_k * X).sum(dim=0)
+            SX_k = (resp_k * E_k).sum(dim=0)
+            SXX_k = S0_k * M_inv + (resp_k * E_k).T @ E_k 
+            SYX_k = (resp_k * X).T @ E_k
+            SY2_k = (resp_k * X**2).sum(dim=0)
+            
+            # 3. Exact Parameter Updates based on Appendix A Eqs 26-28
+            mu_new = S1_k / S0_k
+            self.mu.data[k] = mu_new
+            
+            # Eq 26: Lambda_new = C * SXX^-1
+            C = (SYX_k - torch.outer(mu_new, SX_k)) / S0_k 
+            SXX_norm = SXX_k / S0_k
+            Lambda_new = C @ torch.inverse(SXX_norm + torch.eye(self.q, device=self.device) * 1e-4)
+            self.Lambda.data[k] = Lambda_new
+            
+            # Extracting purely the diagonal noise update 
+            diag_Lambda_C = torch.sum(Lambda_new * C, dim=1)
+            psi_new = (SY2_k / S0_k) - mu_new**2 - diag_Lambda_C
+            
+            self.log_psi.data[k] = torch.log(torch.clamp(psi_new, min=1e-4))
 
     def stepwise_em_update(self, X, log_resp):
         """
-        Performs a single online Stepwise EM update using a mini-batch of streaming data.
+        Pure Online Stepwise EM based on Cappé & Moulines sufficient statistics framework.
+        Tracks moments using learning rate eta to adapt to concept drift.
         """
         X = X.to(self.device)
         N = X.shape[0]
-        resp = torch.exp(log_resp) # (N, K)
-        
-        # 1. Calculate Batch Sufficient Statistics
-        s0_batch = resp.sum(dim=0) / N                             # (K,)
-        s1_batch = (resp.T @ X) / N                                # (K, D)
+        resp = torch.exp(log_resp) 
         
         for k in range(self.K):
-            if s0_batch[k] < 1e-6:
-                continue # Skip if component has virtually no responsibility in this batch
+            resp_k = resp[:, k:k+1] 
+            sum_resp = resp_k.sum()
             
-            # Efficiently calculate batch S2 (D x D) without explicit N x D x D outer products
-            resp_k = resp[:, k:k+1] # (N, 1)
-            s2_batch_k = ((resp_k * X).T @ X) / N                  # (D, D)
+            if sum_resp < 1e-6:
+                continue 
+                
+            # Latent Moments via Woodbury (E-Step) 
+            L_k = self.Lambda[k]                     
+            psi_k = torch.exp(self.log_psi[k]) + 1e-6 
+            inv_psi = 1.0 / psi_k                    
             
-            # 2. Adaptive Learning Rate (eta) based on component maturity
+            L_k_scaled = inv_psi.unsqueeze(1) * L_k  
+            M = torch.eye(self.q, device=self.device) + L_k.T @ L_k_scaled 
+            M_inv = torch.inverse(M)                 
+            
+            A_k = M_inv @ L_k_scaled.T               
+            diff = X - self.mu[k]                    
+            
+            # <x> = A_k(y - mu) 
+            E_k = diff @ A_k.T                       
+            
+            # Batch Sufficient Statistics
+            s0_batch = sum_resp / N
+            s1_batch = (resp_k * X).sum(dim=0) / N
+            sX_batch = (resp_k * E_k).sum(dim=0) / N
+            
+            # <xx^T> = M^-1 + <x><x^T>
+            sXX_batch = (s0_batch * M_inv) + ((resp_k * E_k).T @ E_k) / N
+            sYX_batch = (resp_k * X).T @ E_k / N
+            sY2_batch = (resp_k * X ** 2).sum(dim=0) / N
+            
+            # Adaptive Learning Rate
             k_count = self.update_counts[k].item()
             eta = (k_count + 2) ** (-self.alpha)
             
-            # 3. Interpolate Global Sufficient Statistics
+            # Interpolate Global Statistics
             if k_count == 0:
-                # First time seeing data, accept batch stats completely
-                self.S0[k] = s0_batch[k]
-                self.S1[k] = s1_batch[k]
-                self.S2[k] = s2_batch_k
+                self.S0[k] = s0_batch
+                self.S1[k] = s1_batch
+                self.SX[k] = sX_batch
+                self.SXX[k] = sXX_batch
+                self.SYX[k] = sYX_batch
+                self.SY2[k] = sY2_batch
             else:
-                self.S0[k] = (1 - eta) * self.S0[k] + eta * s0_batch[k]
-                self.S1[k] = (1 - eta) * self.S1[k] + eta * s1_batch[k]
-                self.S2[k] = (1 - eta) * self.S2[k] + eta * s2_batch_k
-            
+                self.S0[k] = (1 - eta) * self.S0[k] + eta * s0_batch
+                self.S1[k] = (1 - eta) * self.S1[k] + eta * s1_batch
+                self.SX[k] = (1 - eta) * self.SX[k] + eta * sX_batch
+                self.SXX[k] = (1 - eta) * self.SXX[k] + eta * sXX_batch
+                self.SYX[k] = (1 - eta) * self.SYX[k] + eta * sYX_batch
+                self.SY2[k] = (1 - eta) * self.SY2[k] + eta * sY2_batch
+                
             self.update_counts[k] += 1
             
-            # 4. M-Step: Recover Parameters from Global Statistics
-            # Update Pi (Global mix proxy)
-            # Note: S0 sums to 1 across all K. We add a tiny epsilon for safety.
-            self.log_pi.data = torch.log(self.S0 / self.S0.sum() + 1e-10)
+            # M-Step (Parameter Updates from global buffers) 
+            S0_k = self.S0[k] + 1e-10
             
-            # Update Mu
-            mu_k = self.S1[k] / (self.S0[k] + 1e-10)
-            self.mu.data[k] = mu_k
+            mu_new = self.S1[k] / S0_k
+            self.mu.data[k] = mu_new
             
-            # Update Covariance, Lambda, and Psi
-            # Sigma_k = S2 / S0 - (mu * mu^T)
-            Sigma_k = (self.S2[k] / (self.S0[k] + 1e-10)) - torch.outer(mu_k, mu_k)
+            C = (self.SYX[k] - torch.outer(mu_new, self.SX[k])) / S0_k
+            SXX_norm = self.SXX[k] / S0_k
             
-            try:
-                # Weighted PCA for Factor Loadings
-                vals, vecs = torch.linalg.eigh(Sigma_k)
-                idx = torch.argsort(vals, descending=True)
-                top_vals = torch.clamp(vals[idx[:self.q]], min=1e-6)
-                top_vecs = vecs[:, idx[:self.q]]
-                
-                L_k_updated = top_vecs * torch.sqrt(top_vals).unsqueeze(0)
-                self.Lambda.data[k] = L_k_updated
-                
-                # Update Psi (Diagonal noise)
-                recon_cov = L_k_updated @ L_k_updated.T
-                psi_update = torch.diagonal(Sigma_k) - torch.diagonal(recon_cov)
-                psi_update = torch.clamp(psi_update, min=1e-6)
-                self.log_psi.data[k] = torch.log(psi_update)
-                
-            except Exception as e:
-                # Fallback if decomposition fails due to numerical instability
-                pass
+            Lambda_new = C @ torch.inverse(SXX_norm + torch.eye(self.q, device=self.device) * 1e-4)
+            self.Lambda.data[k] = Lambda_new
+            
+            diag_Lambda_C = torch.sum(Lambda_new * C, dim=1)
+            psi_new = (self.SY2[k] / S0_k) - mu_new**2 - diag_Lambda_C
+            
+            self.log_psi.data[k] = torch.log(torch.clamp(psi_new, min=1e-4))
+            
+        self.log_pi.data = torch.log(self.S0 / self.S0.sum() + 1e-10)
     
     def compute_component_log_likelihoods(self, X):
-        """
-        Calculates the pure structural/geometric fit using the Woodbury Matrix Identity
-        to avoid O(D^3) inversion of the 120x120 covariance matrix.
-        This calculates log P(x_i | w_j) and entirely ignores the global mixing weights (pi).
-        """
         N, D = X.shape
         log_probs = []
-        
-        # Constant term for the log pdf
         c = D * math.log(2 * math.pi)
         
         for k in range(self.K):
-            L_k = self.Lambda[k]                     # (D, q)
-            psi_k = torch.exp(self.log_psi[k]) + 1e-6 # (D,)
-            inv_psi = 1.0 / psi_k                    # (D,)
+            L_k = self.Lambda[k]                     
+            psi_k = torch.exp(self.log_psi[k]) + 1e-6 
+            inv_psi = 1.0 / psi_k                    
             
-            # 1. Calculate the q x q inner matrix: M = I + Lambda^T * Psi^{-1} * Lambda
-            # Since Psi is diagonal, Psi^{-1} * Lambda is just row-wise multiplication
-            L_k_scaled = inv_psi.unsqueeze(1) * L_k  # (D, q)
-            M = torch.eye(self.q, device=self.device) + L_k.T @ L_k_scaled # (q, q)
+            L_k_scaled = inv_psi.unsqueeze(1) * L_k  
+            M = torch.eye(self.q, device=self.device) + L_k.T @ L_k_scaled 
+            inv_M = torch.inverse(M)                 
             
-            # Invert the tiny q x q matrix
-            inv_M = torch.inverse(M)                 # (q, q)
-            
-            # 2. Calculate the Log Determinant using the determinant lemma:
-            # |C| = |Psi| * |M|
             log_det_psi = torch.sum(torch.log(psi_k))
             log_det_M = torch.logdet(M)
             log_det_C = log_det_psi + log_det_M
             
-            # 3. Calculate Mahalanobis distance: (x-mu)^T C^{-1} (x-mu)
-            diff = X - self.mu[k]                    # (N, D)
+            diff = X - self.mu[k]                    
+            term1 = torch.sum((diff ** 2) * inv_psi, dim=1) 
             
-            # Term 1: diff^T * Psi^{-1} * diff
-            term1 = torch.sum((diff ** 2) * inv_psi, dim=1) # (N,)
+            proj = diff @ L_k_scaled                 
+            term2 = torch.sum((proj @ inv_M) * proj, dim=1) 
             
-            # Term 2: diff^T * Psi^{-1} * Lambda * M^{-1} * Lambda^T * Psi^{-1} * diff
-            # Let proj = diff * Psi^{-1} * Lambda
-            proj = diff @ L_k_scaled                 # (N, q)
-            term2 = torch.sum((proj @ inv_M) * proj, dim=1) # (N,)
-            
-            mahalanobis = term1 - term2              # (N,)
-            
-            # 4. Final Log PDF
+            mahalanobis = term1 - term2              
             log_prob = -0.5 * (c + log_det_C + mahalanobis)
             log_probs.append(log_prob)
             
         return torch.stack(log_probs, dim=1)
     
     def initialize_parameters(self, X):
-        """
-        Initialize mu and psi using K-Means++ (via scikit-learn) for better convergence.
-        """
         from sklearn.cluster import KMeans
-        
         X_cpu = X.cpu().numpy()
         
         kmeans = KMeans(n_clusters=self.K, n_init=10, random_state=42)
@@ -259,72 +234,110 @@ class MFA(nn.Module):
                 if cluster_points.shape[0] > 1:
                     var_k = torch.var(cluster_points, dim=0) + 1e-6
                     self.log_psi.data[k] = torch.log(var_k)
-                    # print(f"Cluster {k}: Variance = {var_k.mean().item():.4f}")
                 else:
                     self.log_psi.data[k] = torch.log(torch.ones(self.D, device=self.device) * 1e-2)
         
     def add_component(self, new_mu, new_Lambda, new_log_psi, new_S0, new_S1, new_S2):
         """
-        Dynamically adds a new component to the Mixture Model and integrates its sufficient statistics.
+        Dynamically adds a component. 
+        We mathematically translate the DxD S2 matrix coming from otfp.py 
+        into our memory-efficient latent sufficient statistics. 
         """
         with torch.no_grad():
-            # 1. Handle Tensor Shape Matching (Padding Lambda)
             q_new = new_Lambda.shape[2]
-            
             if q_new < self.q:
                 pad_size = self.q - q_new
                 new_Lambda = torch.nn.functional.pad(new_Lambda, (0, pad_size))
             elif q_new > self.q:
                 pad_size = q_new - self.q
                 self.Lambda.data = torch.nn.functional.pad(self.Lambda.data, (0, pad_size))
+                
+                # Expand existing statistics buffers along the q dimension
+                self.SX = torch.nn.functional.pad(self.SX, (0, pad_size))
+                self.SXX = torch.nn.functional.pad(self.SXX, (0, pad_size, 0, pad_size))
+                self.SYX = torch.nn.functional.pad(self.SYX, (0, pad_size))
                 self.q = q_new
 
-            # 2. Concatenate the standard parameters safely
             self.mu = nn.Parameter(torch.cat([self.mu.data, new_mu], dim=0))
             self.Lambda = nn.Parameter(torch.cat([self.Lambda.data, new_Lambda], dim=0))
             self.log_psi = nn.Parameter(torch.cat([self.log_psi.data, new_log_psi], dim=0))
+           
+           # Translate DxD external input into Latent Statistics 
+            S0_in = new_S0[0]
+            S1_in = new_S1[0]
+            S2_in = new_S2[0] # D x D 
 
-            # 3. Concatenate the Sufficient Statistics
-            self.S0 = torch.cat([self.S0, new_S0])
-            self.S1 = torch.cat([self.S1, new_S1])
-            self.S2 = torch.cat([self.S2, new_S2])
+            # We must normalize these inputs so they match the scale 
+            # of our global moving average buffers (which are expectations per pixel).
+            # If S0_in is already normalized (e.g., <= 1.0), this division is safe.
+            # If S0_in is an unnormalized sum (e.g., 2000), this converts it.
+            N_shelf = S0_in.clone() 
+            S0_norm = S0_in / N_shelf  # Will equal 1.0 (100% of its own shelf mass)
+            S1_norm = S1_in / N_shelf
+            S2_norm = S2_in / N_shelf
+
+            L = new_Lambda[0] 
+            psi = torch.exp(new_log_psi[0]) + 1e-6
+            inv_psi = 1.0 / psi
+            L_scaled = inv_psi.unsqueeze(1) * L
+            M = torch.eye(self.q, device=self.device) + L.T @ L_scaled
+            M_inv = torch.inverse(M)
+            A = M_inv @ L_scaled.T 
+
+            # Use the normalized values for the translations
+            mu_in = S1_norm / S0_norm 
+
+            new_SX = (A @ (S1_norm - S0_norm * mu_in)).unsqueeze(0)
+            new_SYX = ((S2_norm - torch.outer(S1_norm, mu_in)) @ A.T).unsqueeze(0)
+            cov_Y = S2_norm - torch.outer(S1_norm, mu_in) - torch.outer(mu_in, S1_norm) + S0_norm * torch.outer(mu_in, mu_in)
+            new_SXX = (S0_norm * M_inv + A @ cov_Y @ A.T).unsqueeze(0)
+            new_SY2 = torch.diagonal(S2_norm).unsqueeze(0)
+
+            # NOTE: For S0, we append S0_norm (which is 1.0). But when calculating pi, 
+            # we want the initial weight to be proportional. In an online setting, 
+            # it is safe to initialize a new component's S0 as the average of the others.
+            avg_S0 = self.S0.mean().unsqueeze(0) if self.K > 0 else torch.tensor([1.0], device=self.device)
+
+            self.S0 = torch.cat([self.S0, avg_S0])
+            self.S1 = torch.cat([self.S1, S1_norm.unsqueeze(0) * avg_S0]) # Scale S1 to match new S0
+            self.SX = torch.cat([self.SX, new_SX * avg_S0])
+            self.SXX = torch.cat([self.SXX, new_SXX * avg_S0])
+            self.SYX = torch.cat([self.SYX, new_SYX * avg_S0])
+            self.SY2 = torch.cat([self.SY2, new_SY2 * avg_S0])
             
-            # 4. Initialize the update count to 1 (it has seen its foundational batch)
             self.update_counts = torch.cat([self.update_counts, torch.tensor([1.0], device=self.device)])
-
-            # 5. Automatically update global mixing weights (log_pi) based on the new total S0 mass
             self.log_pi = nn.Parameter(torch.log(self.S0 / self.S0.sum() + 1e-10))
 
-            # Increment the internal component counter
             self.K += 1
             print(f"Model successfully updated! Total components (K) is now {self.K}")
     
     def init_sufficient_statistics(self, X):
-        """
-        Initializes the sufficient statistics (S0, S1, S2) using the converged
-        responsibilities from the initial batch of data. 
-        This provides the statistical inertia needed for Stepwise EM.
-        """
         X = X.to(self.device)
         with torch.no_grad():
-            # Get the final responsibilities for the setup data
             log_resp_norm, _, _ = self.e_step(X)
-            resp = torch.exp(log_resp_norm) # Shape: (N, K)
+            resp = torch.exp(log_resp_norm) 
             N = X.shape[0]
-            # 0th Order: Total weight per component
-            self.S0 = resp.sum(dim=0) 
             
-            # 1st Order: Weighted sum of pixels
-            self.S1 = resp.T @ X      
+            self.S0 = resp.sum(dim=0) / N 
+            self.S1 = (resp.T @ X) / N      
             
-            # 2nd Order: Weighted sum of outer products
             for k in range(self.K):
-                resp_k = resp[:, k:k+1] # Shape: (N, 1)
-                self.S2[k] = (resp_k * X).T @ X / N 
+                resp_k = resp[:, k:k+1] 
+                
+                L_k = self.Lambda[k]
+                psi_k = torch.exp(self.log_psi[k]) + 1e-6
+                inv_psi = 1.0 / psi_k
+                L_k_scaled = inv_psi.unsqueeze(1) * L_k
+                M = torch.eye(self.q, device=self.device) + L_k.T @ L_k_scaled
+                M_inv = torch.inverse(M)
+                A_k = M_inv @ L_k_scaled.T
+                
+                diff = X - self.mu[k]
+                E_k = diff @ A_k.T
+                
+                self.SX[k] = (resp_k * E_k).sum(dim=0) / N
+                self.SXX[k] = (self.S0[k] * M_inv) + ((resp_k * E_k).T @ E_k) / N
+                self.SYX[k] = (resp_k * X).T @ E_k / N
+                self.SY2[k] = (resp_k * X**2).sum(dim=0) / N
             
-            # Set update counts to 1 to signify the model has processed its 
-            # foundational "batch" and shouldn't overwrite it.
             self.update_counts = torch.ones(self.K, device=self.device)
-            
-        print(f"Sufficient statistics initialized. Model total mass (S0 sum): {self.S0.sum().item():.2f}")
-    
