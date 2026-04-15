@@ -1,5 +1,5 @@
 import torch
-from experimental_setups.sEM_v4.mfa import MFA
+from mfa import MFA
 
 class MFA_OTFP:
     def __init__(self, init_data: torch.Tensor, n_channels: int, outlier_significance: float, device: str, outlier_update_treshold: int, L2_normalization: bool = True, q_max: int = 5):
@@ -47,7 +47,7 @@ class MFA_OTFP:
         mad_ll = torch.median(torch.abs(log_likelihood - median_ll))
         robust_std_ll = 1.4826 * mad_ll
         
-        self.num_sigma = 6.0 
+        self.num_sigma = 2.0 
         self.global_threshold = (median_ll - (self.num_sigma * robust_std_ll)).item()
         
         # Extract Anchors & Set Local Thresholds
@@ -213,7 +213,7 @@ class MFA_OTFP:
                         mad_ll = torch.median(torch.abs(log_likelihood - median_ll))
                         robust_std_ll = 1.4826 * mad_ll
                         
-                        self.num_sigma = 6.0 
+                        self.num_sigma = 2.0 
                         self.global_threshold = (median_ll - (self.num_sigma * robust_std_ll)).item()
 
             # Burn the shelf (happens regardless of whether a component was birthed or if it was all noise)

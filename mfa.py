@@ -35,11 +35,10 @@ class MFA(nn.Module):
         prev_ll = -float('inf')
         with torch.no_grad():
             for i in range(self.max_iter):
-                # --- E-Step ---
+                
                 log_resp, log_likelihood, _ = self.e_step(X)
                 current_ll = log_likelihood.mean()
                 
-                # --- M-Step ---
                 resp = torch.exp(log_resp) # (N, K)
                 self.m_step(X, resp)
                 
@@ -157,7 +156,6 @@ class MFA(nn.Module):
             
             # 4. M-Step: Recover Parameters from Global Statistics
             # Update Pi (Global mix proxy)
-            # Note: S0 sums to 1 across all K. We add a tiny epsilon for safety.
             self.log_pi.data = torch.log(self.S0 / self.S0.sum() + 1e-10)
             
             # Update Mu
