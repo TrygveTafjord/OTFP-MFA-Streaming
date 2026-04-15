@@ -1,5 +1,5 @@
 import torch
-from mfa import MFA
+from mfa_debug import MFA
 
 class MFA_OTFP:
     def __init__(self, init_data: torch.Tensor, n_channels: int, outlier_significance: float, device: str, outlier_update_treshold: int, L2_normalization: bool = True, q_max: int = 5):

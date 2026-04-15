@@ -140,8 +140,20 @@ if __name__ == "__main__":
         save_dir = 'testing/models/'
         os.makedirs(save_dir, exist_ok=True) # Prevents crashes if folder doesn't exist
         
-        save_path = f'{save_dir}/otfp_mfa.pt'
+        save_path = f'{save_dir}/otfp_mfa_debug.pt'
         
         # 4. Save to disk
         torch.save(mfa_state, save_path)
         print(f"\n MFA model successfully saved to '{save_path}'")
+
+        # --- ADDED CODE: EXTRACT AND SAVE TELEMETRY ---
+        print("\n Extracting and saving debug telemetry...")
+        telemetry_df = MFA_OTFP_model.MFA.get_telemetry_df()
+        
+        if not telemetry_df.empty:
+            telemetry_path = f'{save_dir}/mfa_telemetry.csv'
+            telemetry_df.to_csv(telemetry_path, index=False)
+            print(f" Telemetry data successfully saved to '{telemetry_path}'")
+        else:
+            print(" Warning: Telemetry DataFrame was empty. Did the model run any updates?")
+        # ----------------------------------------------

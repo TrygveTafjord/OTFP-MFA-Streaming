@@ -19,7 +19,6 @@ class MFA(nn.Module):
         self.Lambda = nn.Parameter(torch.randn(self.K, self.D, self.q, device=self.device) * 0.1)
         self.log_psi = nn.Parameter(torch.log(torch.ones(self.K, self.D, device=self.device) * 1e-2))
 
-        # --- MEMORY EFFICIENT SUFFICIENT STATISTICS ---
         # We replace the DxD S2 matrix with theoretically pure latent statistics.
         self.register_buffer('S0', torch.zeros(self.K, device=self.device))                  # 0th order (Scalar)
         self.register_buffer('S1', torch.zeros(self.K, self.D, device=self.device))          # 1st order Y (D)
@@ -27,7 +26,6 @@ class MFA(nn.Module):
         self.register_buffer('SXX', torch.zeros(self.K, self.q, self.q, device=self.device)) # 2nd order Latent XX (q x q)
         self.register_buffer('SYX', torch.zeros(self.K, self.D, self.q, device=self.device)) # Cross-order YX (D x q)
         self.register_buffer('SY2', torch.zeros(self.K, self.D, device=self.device))         # Diagonal of YY (D)
-        
         self.register_buffer('update_counts', torch.zeros(self.K, device=self.device))
         
     def fit(self, X):
@@ -92,17 +90,15 @@ class MFA(nn.Module):
             SYX_k = (resp_k * X).T @ E_k
             SY2_k = (resp_k * X**2).sum(dim=0)
             
-            # 3. Exact Parameter Updates based on Appendix A Eqs 26-28 [cite: 708, 709]
             mu_new = S1_k / S0_k
             self.mu.data[k] = mu_new
             
-            # Eq 26: Lambda_new = C * SXX^-1 [cite: 708]
+            # Lambda_new = C * SXX^-1
             C = (SYX_k - torch.outer(mu_new, SX_k)) / S0_k 
             SXX_norm = SXX_k / S0_k
             Lambda_new = C @ torch.inverse(SXX_norm)
             self.Lambda.data[k] = Lambda_new
-            
-            # Eq 28: Extracting purely the diagonal noise update [cite: 708, 709]
+
             diag_Lambda_C = torch.sum(Lambda_new * C, dim=1)
             psi_new = (SY2_k / S0_k) - mu_new**2 - diag_Lambda_C
             
@@ -124,7 +120,6 @@ class MFA(nn.Module):
             if sum_resp < 1e-6:
                 continue 
                 
-            # --- Latent Moments via Woodbury (E-Step) ---
             L_k = self.Lambda[k]                     
             psi_k = torch.exp(self.log_psi[k]) + 1e-6 
             inv_psi = 1.0 / psi_k                    
@@ -136,24 +131,24 @@ class MFA(nn.Module):
             A_k = M_inv @ L_k_scaled.T               
             diff = X - self.mu[k]                    
             
-            # <x> = A_k(y - mu) [cite: 728]
+            # <x> = A_k(y - mu)
             E_k = diff @ A_k.T                       
             
-            # --- Batch Sufficient Statistics ---
+            # Batch Sufficient Statistics
             s0_batch = sum_resp / N
             s1_batch = (resp_k * X).sum(dim=0) / N
             sX_batch = (resp_k * E_k).sum(dim=0) / N
             
-            # <xx^T> = M^-1 + <x><x^T> [cite: 730]
+            # <xx^T> = M^-1 + <x><x^T>
             sXX_batch = (s0_batch * M_inv) + ((resp_k * E_k).T @ E_k) / N
             sYX_batch = (resp_k * X).T @ E_k / N
             sY2_batch = (resp_k * X ** 2).sum(dim=0) / N
             
-            # --- Adaptive Learning Rate ---
+            # Adaptive Learning Rate
             k_count = self.update_counts[k].item()
             eta = (k_count + 2) ** (-self.alpha)
             
-            # --- Interpolate Global Statistics ---
+            # Interpolate Global Statistics 
             if k_count == 0:
                 self.S0[k] = s0_batch
                 self.S1[k] = s1_batch
@@ -171,7 +166,8 @@ class MFA(nn.Module):
                 
             self.update_counts[k] += 1
             
-            # --- M-Step (Parameter Updates from global buffers) ---
+            # M-Step (Parameter Updates from global buffers)
+            
             S0_k = self.S0[k] + 1e-10
             
             mu_new = self.S1[k] / S0_k
