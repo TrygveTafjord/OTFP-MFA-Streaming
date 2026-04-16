@@ -1,24 +1,22 @@
+from scipy.stats import chi2
 import torch
 from mfa import MFA
 
 class MFA_OTFP:
-    def __init__(self, init_data: torch.Tensor, n_channels: int, outlier_significance: float, device: str, outlier_update_treshold: int, L2_normalization: bool = True, q_max: int = 5):
+    def __init__(self, init_data: torch.Tensor, n_channels: int, device: str, outlier_update_treshold: int, L2_normalization: bool = True, q_max: int = 5):
         # System hyperparameters
         self.device = device
         self.n_channels = n_channels
         self.q_max = q_max
         self.outlier_update_treshold = outlier_update_treshold
-        self.outlier_significance = outlier_significance
         self.L2_normalization = L2_normalization
 
         # MFA model-state 
         K, q = self._perform_model_selection(data=init_data, n_channels=n_channels, q_max=q_max)
         self.MFA = MFA(n_components=K, n_channels=n_channels, n_factors=q).to(self.device)
-        
-        self.component_repos = {}
 
         # Use a single global threshold
-        self.global_threshold = 0.0 
+        self.chi2_threshold = float(chi2.ppf(0.9999, df=self.n_channels))
         
         self._run_mfa_setup(init_data)
         
@@ -40,40 +38,8 @@ class MFA_OTFP:
             self.MFA.initialize_parameters(X)
             self.MFA.fit(X) 
             self.MFA.init_sufficient_statistics(X)
-            log_resp_norm, log_likelihood, log_probs = self.MFA.e_step(X)
-        
-        # Global Threshold Setup (Median + MAD)
-        median_ll = torch.median(log_likelihood)
-        mad_ll = torch.median(torch.abs(log_likelihood - median_ll))
-        robust_std_ll = 1.4826 * mad_ll
-        
-        self.num_sigma = 2.0 
-        self.global_threshold = (median_ll - (self.num_sigma * robust_std_ll)).item()
-        
-        # Extract Anchors & Set Local Thresholds
-        self.repo_size = 200
-        self.component_repos = {}
-        self.local_thresholds = torch.zeros(self.MFA.K, device=self.device)
-        
-        best_components = torch.argmax(log_resp_norm, dim=1)
-        
-        for k in range(self.MFA.K):
-            mask_k = (best_components == k)
-            X_k = X[mask_k]
             
-            if len(X_k) > 0:
-                probs_k = log_probs[mask_k, k]
-                num_to_take = min(self.repo_size, len(X_k))
-                
-                # Get the absolute best-fitting pixels
-                _, top_indices = torch.topk(probs_k, num_to_take)
-                self.component_repos[k] = X_k[top_indices].clone()
-                
-            else:
-                self.component_repos[k] = torch.empty((0, self.n_channels), device=self.device)
-                self.local_thresholds[k] = -float('inf')
-
-        print(f"Global anomaly threshold initialized: {self.global_threshold:.2f}")
+        print(f"Theoretical Chi-Square threshold initialized: {self.chi2_threshold:.2f}")
         return
 
     def _perform_model_selection(self, data, n_channels, q_max):
@@ -93,9 +59,11 @@ class MFA_OTFP:
         
         with torch.no_grad():
             # We need log_probs back to figure out which component the inliers belong to
-            _, log_likelihood, log_probs = self.MFA.e_step(X)
+            _, _, _, mahalanobis_dists = self.MFA.e_step(X)
 
-        outlier_mask = log_likelihood < self.global_threshold
+        min_mahalanobis, _ = torch.min(mahalanobis_dists, dim=1)
+        outlier_mask = min_mahalanobis > self.chi2_threshold
+
         inlier_mask = ~outlier_mask
         
         num_new_outliers = outlier_mask.sum().item()
@@ -108,7 +76,7 @@ class MFA_OTFP:
                 X_inliers = X[inlier_mask]
 
                 # Use the E-step to get the normalized responsibilities for the inliers
-                log_resp_norm, _, _ = self.MFA.e_step(X_inliers)
+                log_resp_norm, _, _, _ = self.MFA.e_step(X_inliers)
 
                 # Stream the block directly into the Stepwise EM updater
                 self.MFA.stepwise_em_update(X_inliers, log_resp_norm)
@@ -188,33 +156,7 @@ class MFA_OTFP:
                             )
 
                             # 1. Evaluate the data on the updated MFA (Note: we need log_probs_new here!)
-                            log_resp_norm_new_data, _, log_probs_new = self.MFA.e_step(X)
-                        
-                        # 2. Isolate the responsibilities specifically for the NEW component (the last one)
-                        new_comp_idx = self.MFA.K - 1 
-                        new_comp_probs = log_resp_norm_new_data[:, new_comp_idx]
-                        
-                        # 3. Get the top pixels that fit this new component
-                        num_to_take = min(2 * self.n_channels, len(X))
-                        _, top_indices = torch.topk(new_comp_probs, num_to_take)
-                        
-                        # 4. Update your trackers and repos using the correct index
-                        self.component_repos[new_comp_idx] = X[top_indices].clone()
-
-                        # 5. Concatenate all anchor pixels across all components
-                        repo_tensors = [self.component_repos[i] for i in range(self.MFA.K)]
-                        total_dataset = torch.cat(repo_tensors, dim=0)
-                        
-                        # 6. Calculate the new global threshold based on the combined anchors
-                        with torch.no_grad():
-                            log_resp_norm, log_likelihood, log_probs = self.MFA.e_step(total_dataset)
-                        
-                        median_ll = torch.median(log_likelihood)
-                        mad_ll = torch.median(torch.abs(log_likelihood - median_ll))
-                        robust_std_ll = 1.4826 * mad_ll
-                        
-                        self.num_sigma = 2.0 
-                        self.global_threshold = (median_ll - (self.num_sigma * robust_std_ll)).item()
+                            log_resp_norm_new_data, _, log_probs_new, _ = self.MFA.e_step(X)
 
             # Burn the shelf (happens regardless of whether a component was birthed or if it was all noise)
             self.num_outliers_on_shelf = 0

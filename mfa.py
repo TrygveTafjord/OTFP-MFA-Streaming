@@ -36,7 +36,7 @@ class MFA(nn.Module):
         with torch.no_grad():
             for i in range(self.max_iter):
                 
-                log_resp, log_likelihood, _ = self.e_step(X)
+                log_resp, log_likelihood, _ , _= self.e_step(X)
                 current_ll = log_likelihood.mean()
                 
                 resp = torch.exp(log_resp) # (N, K)
@@ -58,21 +58,14 @@ class MFA(nn.Module):
         -Total log-likelihood h_ij = P(w_j|x_i) = (P(X_i | w_j) pi_j)/P(x_i)
         -Raw geometric fits.
         """
-        # 1. Get the pure physical/geometric fit (Shape: [N, K])
-        log_probs = self.compute_component_log_likelihoods(X)
+        log_probs, mahalanobis_dists = self.compute_component_log_likelihoods(X)
         
-        # 2. Add the Bayesian Prior (log_pi) to get unnormalized responsibilities
-        # self.log_pi has shape [K]. unsqueeze(0) makes it [1, K] for perfect broadcasting against [N, K]
         log_resps = log_probs + self.log_pi.unsqueeze(0)
-        
-        # 3. Marginalize to find the total log-likelihood for the Purity Guardrail (Shape: [N])
         log_likelihood = torch.logsumexp(log_resps, dim=1)
-        
-        # 4. Normalize to get the final posterior responsibilities (Shape: [N, K])
         log_resp_norm = log_resps - log_likelihood.unsqueeze(1)
         
-        # Return all three so OTFP can use geometry for drift, and EM can use resps for updates
-        return log_resp_norm, log_likelihood, log_probs
+        # NEW: Return the distances alongside your existing outputs
+        return log_resp_norm, log_likelihood, log_probs, mahalanobis_dists
 
     def m_step(self, X, resp):
         N = X.shape[0]
@@ -110,7 +103,7 @@ class MFA(nn.Module):
                 diag_recon = torch.diagonal(recon_cov)
                 
                 psi_update = diag_S_k - diag_recon
-                psi_update = torch.clamp(psi_update, min=1e-6) # Ensure strictly positive noise
+                psi_update = torch.clamp(psi_update, min=1e-5) # Ensure strictly positive noise
                 
                 self.log_psi.data[k] = torch.log(psi_update)
                 
@@ -179,7 +172,7 @@ class MFA(nn.Module):
                 # Update Psi (Diagonal noise)
                 recon_cov = L_k_updated @ L_k_updated.T
                 psi_update = torch.diagonal(Sigma_k) - torch.diagonal(recon_cov)
-                psi_update = torch.clamp(psi_update, min=1e-6)
+                psi_update = torch.clamp(psi_update, min=1e-5)
                 self.log_psi.data[k] = torch.log(psi_update)
                 
             except Exception as e:
@@ -194,6 +187,7 @@ class MFA(nn.Module):
         """
         N, D = X.shape
         log_probs = []
+        mahalanobis_dists = []
         
         # Constant term for the log pdf
         c = D * math.log(2 * math.pi)
@@ -229,12 +223,16 @@ class MFA(nn.Module):
             term2 = torch.sum((proj @ inv_M) * proj, dim=1) # (N,)
             
             mahalanobis = term1 - term2              # (N,)
-            
+            mahalanobis_dists.append(mahalanobis)
+
             # 4. Final Log PDF
             log_prob = -0.5 * (c + log_det_C + mahalanobis)
             log_probs.append(log_prob)
-            
-        return torch.stack(log_probs, dim=1)
+
+            # Mahalanobis distances can be useful for OTFP drift detection, so we store them as well
+                
+        return torch.stack(log_probs, dim=1), torch.stack(mahalanobis_dists, dim=1) # NEW: Return both    
+    
     
     def initialize_parameters(self, X):
         """
@@ -299,7 +297,7 @@ class MFA(nn.Module):
     def init_sufficient_statistics(self, X):
         X = X.to(self.device)
         with torch.no_grad():
-            log_resp_norm, _, _ = self.e_step(X)
+            log_resp_norm, _, _, _ = self.e_step(X)
             resp = torch.exp(log_resp_norm) 
             N = X.shape[0]
             
