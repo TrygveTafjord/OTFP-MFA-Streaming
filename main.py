@@ -11,7 +11,6 @@ PERFORM_TIMING = True
 
 ## MODEL PARAMETERS
 NUM_CHANNELS = 120                          
-NUM_SIGMA = 8.0                 
 OUTLIER_UPDATE_TRESHOLD = 2000               
 Q_MAX = 8 
 
@@ -34,7 +33,6 @@ if __name__ == "__main__":
     MFA_OTFP_model = MFA_OTFP(
         init_data=initial_batch,
         n_channels=NUM_CHANNELS, 
-        outlier_significance=NUM_SIGMA, 
         device=device, 
         outlier_update_treshold=OUTLIER_UPDATE_TRESHOLD,
         q_max=Q_MAX,
