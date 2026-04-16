@@ -58,7 +58,7 @@ class MFA(nn.Module):
         -Total log-likelihood h_ij = P(w_j|x_i) = (P(X_i | w_j) pi_j)/P(x_i)
         -Raw geometric fits.
         """
-        log_probs, mahalanobis_dists = self.compute_component_log_likelihoods(X)
+        log_probs, mahalanobis_dists = self.compute_distances_and_log_probs(X)
         
         log_resps = log_probs + self.log_pi.unsqueeze(0)
         log_likelihood = torch.logsumexp(log_resps, dim=1)
@@ -179,7 +179,7 @@ class MFA(nn.Module):
                 # Fallback if decomposition fails due to numerical instability
                 pass
     
-    def compute_component_log_likelihoods(self, X):
+    def compute_distances_and_log_probs(self, X):
         """
         Calculates the pure structural/geometric fit using the Woodbury Matrix Identity
         to avoid O(D^3) inversion of the 120x120 covariance matrix.

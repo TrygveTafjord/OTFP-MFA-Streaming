@@ -35,7 +35,7 @@ class MFA_OTFP:
             X = torch.nn.functional.normalize(X, p=2, dim=1)
 
         with torch.no_grad():
-            self.MFA.initialize_parameters(X)
+            #self.MFA.initialize_parameters(X)
             self.MFA.fit(X) 
             self.MFA.init_sufficient_statistics(X)
             
@@ -132,7 +132,7 @@ class MFA_OTFP:
                         with torch.no_grad():
                             # Train the temporary MFA on the pure cluster
                             temp_mfa = MFA(n_components=1, n_channels=self.MFA.D, n_factors=q_new, device=self.device)
-                            temp_mfa.initialize_parameters(X_pure)
+                           # temp_mfa.initialize_parameters(X_pure)
                             temp_mfa.fit(X_pure)
                             
                             # Calculate Sufficient 
