@@ -1,6 +1,7 @@
 from scipy.stats import chi2
 import torch
 from mfa import MFA
+from bayesian_model_selector import BayesianMFA_Initializer
 
 class MFA_OTFP:
     def __init__(self, init_data: torch.Tensor, n_channels: int, device: str, outlier_update_treshold: int, L2_normalization: bool = True, q_max: int = 5):
@@ -43,10 +44,54 @@ class MFA_OTFP:
         return
 
     def _perform_model_selection(self, data, n_channels, q_max):
-        # Dummy implementation
-        K = 2      
-        q = 4
-        return K, q
+        """
+        Runs Variational/MAP Bayesian MFA on the initialization data to 
+        automatically discover the optimal number of components (K) and factors (q).
+        """
+        # 1. Define an intentionally large starting assumption
+        K_max = 15  # Adjust based on expected maximum initial materials
+        
+        print(f"Starting Bayesian model selection with K_max={K_max}, q_max={q_max}...")
+        
+        # 2. Instantiate the Bayesian Initializer
+        # (Assuming BayesianMFA_Initializer is imported from mfa.py)
+        bayesian_initializer = BayesianMFA_Initializer(
+            n_components=K_max, 
+            n_channels=n_channels, 
+            q_max=q_max, 
+            device=self.device
+        )
+        
+        # 3. Fit the model to the initial shelf/batch of data
+        bayesian_initializer.fit_with_ard(data)
+        
+        # 4. Extract the surviving K and q
+        with torch.no_grad():
+            # Find K: Components whose mixing weights (pi) didn't shrink to zero
+            pi_threshold = 1e-3
+            pi = torch.exp(bayesian_initializer.log_pi)
+            active_components = pi > pi_threshold
+            optimal_K = active_components.sum().item()
+            
+            # Find q: Count surviving factors (alpha < threshold) for the active components
+            alpha_threshold = 1e4
+            if optimal_K > 0:
+                # Get the active factors only for the surviving components
+                active_q_per_component = (bayesian_initializer.alpha[active_components] < alpha_threshold).sum(dim=1)
+                
+                # Your standard MFA class expects a single global q. 
+                # Taking the max ensures no component is starved of latent capacity.
+                optimal_q = active_q_per_component.max().item()
+            else:
+                optimal_q = 1
+        
+        # 5. Safety fallbacks in case of aggressive over-pruning
+        optimal_K = max(1, optimal_K)
+        optimal_q = max(1, optimal_q)
+        
+        print(f"Model selection complete! Optimal K = {optimal_K}, Optimal q = {optimal_q}")
+        
+        return optimal_K, optimal_q
 
     def process_data_block(self, X):
         if self.MFA is None:
@@ -94,7 +139,6 @@ class MFA_OTFP:
             from sklearn.cluster import DBSCAN
             
             # eps=0.05 on cosine distance means pixels must be highly directionally similar.
-            # min_samples ensures we don't build models for tiny micro-clusters.
             dbscan = DBSCAN(eps=0.05, min_samples=2*self.n_channels, metric='cosine')
             labels = dbscan.fit_predict(X_outliers.cpu().numpy())
             labels_tensor = torch.tensor(labels, device=self.device)
@@ -105,60 +149,70 @@ class MFA_OTFP:
             if not valid_mask.any():
                 print("Shelf full, but only contained scattered noise. Burning shelf.")
             else:
-                # Find the largest coherent cluster among the non-noise points
+                # Find all unique clusters and their sizes
                 valid_labels = labels_tensor[valid_mask]
-                cluster_counts = torch.bincount(valid_labels)
-                dominant_cluster_idx = int(torch.argmax(cluster_counts).item())
-                dominant_size = cluster_counts[dominant_cluster_idx].item()
+                unique_clusters, cluster_counts = torch.unique(valid_labels, return_counts=True)
                 
-                # Require a minimum density to justify birthing a new component
-                MIN_PURE_PIXELS = int(self.outlier_update_treshold * 0.75)
+                # We lower the threshold so multiple materials can be found simultaneously.
+                # Must have at least enough pixels to calculate covariance reliably (e.g., 2x channels)
+                # or a small percentage of the shelf.
+                MIN_PURE_PIXELS = max(int(self.outlier_update_treshold * 0.15), 2 * self.n_channels)
                 
-                if dominant_size >= MIN_PURE_PIXELS:
-                    pure_material_mask = (labels_tensor == dominant_cluster_idx)
-                    X_pure = X_outliers[pure_material_mask]
+                components_birthed = 0
+                
+                # LOOP OVER ALL CLUSTERS FOUND BY DBSCAN
+                for cluster_idx, size in zip(unique_clusters, cluster_counts):
+                    if size.item() >= MIN_PURE_PIXELS:
+                        pure_material_mask = (labels_tensor == cluster_idx)
+                        X_pure = X_outliers[pure_material_mask]
 
-                    print(f"Shelf full. DBSCAN isolated {X_pure.shape[0]} pure pixels. Birthing new component.") 
+                        print(f"\n--- Spawning Component for Cluster {cluster_idx.item()} ---")
+                        print(f"DBSCAN isolated {size.item()} pure pixels.") 
 
-                    cov_matrix = torch.cov(X_pure.T)
-                    eigenvalues = torch.linalg.eigvalsh(cov_matrix)
-                    eigenvalues = torch.flip(eigenvalues, dims=[0])
+                        global_q = self.MFA.q
 
-                    cumulative_variance = torch.cumsum(eigenvalues, dim=0) / torch.sum(eigenvalues)
-                    q_new = torch.searchsorted(cumulative_variance, 0.95).item() + 1
-                    print(f"Needed: {q_new} PCs to describe 95% of variance in the setup")
-                    
-                    if q_new <= self.q_max:
+                        # ---------------------------------------------------------
+                        # THE BAYESIAN SPAWNER
+                        # ---------------------------------------------------------
                         with torch.no_grad():
-                            # Train the temporary MFA on the pure cluster
-                            temp_mfa = MFA(n_components=1, n_channels=self.MFA.D, n_factors=q_new, device=self.device)
-                           # temp_mfa.initialize_parameters(X_pure)
-                            temp_mfa.fit(X_pure)
+                            bayesian_spawner = BayesianMFA_Initializer(
+                                n_components=1, 
+                                n_channels=self.MFA.D, 
+                                q_max=global_q, 
+                                max_iter=30, 
+                                device=self.device
+                            )
                             
-                            # Calculate Sufficient 
+                            bayesian_spawner.fit_with_ard(X_pure)
+                            
+                            #surviving_factors = (bayesian_spawner.alpha[0] < 1e4).sum().item()
+                            #print(f"ARD Spawner activated {surviving_factors} effective factors out of {global_q} available.")
+
                             N_pure = X_pure.shape[0]
-                            
-                            # Because these pixels are 100% assigned to this new component, 
-                            # the average responsibility per pixel is exactly 1.0
                             new_S0 = torch.tensor([1.0], dtype=torch.float32, device=self.device)
-                            
-                            # Mean instead of sum
                             new_S1 = X_pure.mean(dim=0, keepdim=True)            
                             new_S2 = (X_pure.T @ X_pure).unsqueeze(0) / N_pure  
 
                             self.MFA.add_component(
-                                new_mu=temp_mfa.mu.data,
-                                new_Lambda=temp_mfa.Lambda.data,
-                                new_log_psi=temp_mfa.log_psi.data,
+                                new_mu=bayesian_spawner.mu.data,
+                                new_Lambda=bayesian_spawner.Lambda.data, 
+                                new_log_psi=bayesian_spawner.log_psi.data,
                                 new_S0=new_S0,
                                 new_S1=new_S1,
                                 new_S2=new_S2
                             )
+                            components_birthed += 1
+                        # ---------------------------------------------------------
+                
+                if components_birthed > 0:
+                    print(f"\nSuccessfully birthed {components_birthed} new components this cycle.")
+                    # 1. Evaluate the data on the updated MFA only ONCE after all new components are added
+                    with torch.no_grad():
+                        log_resp_norm_new_data, _, log_probs_new, _ = self.MFA.e_step(X)
+                else:
+                    print(f"Clusters found, but none met the minimum size threshold ({MIN_PURE_PIXELS} pixels). Burning shelf.")
 
-                            # 1. Evaluate the data on the updated MFA (Note: we need log_probs_new here!)
-                            log_resp_norm_new_data, _, log_probs_new, _ = self.MFA.e_step(X)
-
-            # Burn the shelf (happens regardless of whether a component was birthed or if it was all noise)
+            # Burn the shelf (happens regardless of whether components were birthed)
             self.num_outliers_on_shelf = 0
 
         # =====================================================================

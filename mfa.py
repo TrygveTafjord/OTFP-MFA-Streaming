@@ -234,7 +234,7 @@ class MFA(nn.Module):
         return torch.stack(log_probs, dim=1), torch.stack(mahalanobis_dists, dim=1) # NEW: Return both    
     
     
-    def initialize_parameters(self, X):
+    #def initialize_parameters(self, X):
         """
         Initialize mu and psi using K-Means++ (via scikit-learn) for better convergence.
         """
