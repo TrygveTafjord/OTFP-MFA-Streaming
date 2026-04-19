@@ -233,30 +233,6 @@ class MFA(nn.Module):
                 
         return torch.stack(log_probs, dim=1), torch.stack(mahalanobis_dists, dim=1) # NEW: Return both    
     
-    
-    #def initialize_parameters(self, X):
-        """
-        Initialize mu and psi using K-Means++ (via scikit-learn) for better convergence.
-        """
-        from sklearn.cluster import KMeans
-        
-        X_cpu = X.cpu().numpy()
-        
-        kmeans = KMeans(n_clusters=self.K, n_init=10, random_state=42)
-        labels = kmeans.fit_predict(X_cpu)
-        centroids = kmeans.cluster_centers_
-        
-        with torch.no_grad():
-            self.mu.data = torch.tensor(centroids, dtype=torch.float32).to(self.mu.device)
-
-            for k in range(self.K):
-                cluster_points = X[labels == k]
-                if cluster_points.shape[0] > 1:
-                    var_k = torch.var(cluster_points, dim=0) + 1e-6
-                    self.log_psi.data[k] = torch.log(var_k)
-                    # print(f"Cluster {k}: Variance = {var_k.mean().item():.4f}")
-                else:
-                    self.log_psi.data[k] = torch.log(torch.ones(self.D, device=self.device) * 1e-2)
         
     def add_component(self, new_mu, new_Lambda, new_log_psi, new_S0, new_S1, new_S2):
         """

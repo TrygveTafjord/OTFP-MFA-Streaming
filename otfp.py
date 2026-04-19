@@ -2,6 +2,7 @@ from scipy.stats import chi2
 import torch
 from mfa import MFA
 from bayesian_model_selector import BayesianMFA_Initializer
+from sklearn.cluster import DBSCAN
 
 class MFA_OTFP:
     def __init__(self, init_data: torch.Tensor, n_channels: int, device: str, outlier_update_treshold: int, L2_normalization: bool = True, q_max: int = 5):
@@ -105,40 +106,47 @@ class MFA_OTFP:
         with torch.no_grad():
             # We need log_probs back to figure out which component the inliers belong to
             _, _, _, mahalanobis_dists = self.MFA.e_step(X)
-
         min_mahalanobis, _ = torch.min(mahalanobis_dists, dim=1)
         outlier_mask = min_mahalanobis > self.chi2_threshold
-
         inlier_mask = ~outlier_mask
-        
         num_new_outliers = outlier_mask.sum().item()
 
-        # =====================================================================
-        # 1. TRACK INLIERS & CATCH LOCAL DRIFTERS (SHADOWS/MIXTURES)
-        # =====================================================================
+        # 1. TRACK INLIERS & CATCH LOCAL DRIFTERS
         if inlier_mask.any():
-            with torch.no_grad():
                 X_inliers = X[inlier_mask]
+                self._process_inliners(X_inliers)
 
-                # Use the E-step to get the normalized responsibilities for the inliers
-                log_resp_norm, _, _, _ = self.MFA.e_step(X_inliers)
-
-                # Stream the block directly into the Stepwise EM updater
-                self.MFA.stepwise_em_update(X_inliers, log_resp_norm)
-        # =====================================================================
-
-        # =====================================================================
         # 2. GLOBAL OUTLIER SHELF & COMPONENT BIRTHING
-        # =====================================================================
         if num_new_outliers + self.num_outliers_on_shelf > self.outlier_update_treshold:
             
             X_outliers = self.global_outliers_shelf[:self.num_outliers_on_shelf]
             X_outliers = torch.cat([X_outliers, X[outlier_mask]], dim=0)
 
-            # Use DBSCAN to isolate true signals from random noise ---
-            from sklearn.cluster import DBSCAN
+            self._birth_new_components(X_outliers)
             
-            # eps=0.05 on cosine distance means pixels must be highly directionally similar.
+            self.num_outliers_on_shelf = 0
+
+
+        # 3. ADD TO GLOBAL OUTLIER SHELF (If not full yet)
+        elif num_new_outliers > 0:
+            start_idx = self.num_outliers_on_shelf            
+            end_idx = start_idx + num_new_outliers
+            
+            self.global_outliers_shelf[start_idx : end_idx] = X[outlier_mask][:num_new_outliers]
+            self.num_outliers_on_shelf += num_new_outliers
+                    
+        return
+    
+
+    def _process_inliners(self, X_inliers):
+        with torch.no_grad():
+            log_resp_norm, _, _, _ = self.MFA.e_step(X_inliers)
+            self.MFA.stepwise_em_update(X_inliers, log_resp_norm)
+        return
+    
+
+    def _birth_new_components(self, X_outliers):
+            
             dbscan = DBSCAN(eps=0.05, min_samples=2*self.n_channels, metric='cosine')
             labels = dbscan.fit_predict(X_outliers.cpu().numpy())
             labels_tensor = torch.tensor(labels, device=self.device)
@@ -148,84 +156,54 @@ class MFA_OTFP:
             
             if not valid_mask.any():
                 print("Shelf full, but only contained scattered noise. Burning shelf.")
-            else:
-                # Find all unique clusters and their sizes
-                valid_labels = labels_tensor[valid_mask]
-                unique_clusters, cluster_counts = torch.unique(valid_labels, return_counts=True)
-                
-                # We lower the threshold so multiple materials can be found simultaneously.
-                # Must have at least enough pixels to calculate covariance reliably (e.g., 2x channels)
-                # or a small percentage of the shelf.
-                MIN_PURE_PIXELS = max(int(self.outlier_update_treshold * 0.15), 2 * self.n_channels)
-                
-                components_birthed = 0
-                
-                # LOOP OVER ALL CLUSTERS FOUND BY DBSCAN
-                for cluster_idx, size in zip(unique_clusters, cluster_counts):
-                    if size.item() >= MIN_PURE_PIXELS:
-                        pure_material_mask = (labels_tensor == cluster_idx)
-                        X_pure = X_outliers[pure_material_mask]
-
-                        print(f"\n--- Spawning Component for Cluster {cluster_idx.item()} ---")
-                        print(f"DBSCAN isolated {size.item()} pure pixels.") 
-
-                        global_q = self.MFA.q
-
-                        # ---------------------------------------------------------
-                        # THE BAYESIAN SPAWNER
-                        # ---------------------------------------------------------
-                        with torch.no_grad():
-                            bayesian_spawner = BayesianMFA_Initializer(
-                                n_components=1, 
-                                n_channels=self.MFA.D, 
-                                q_max=global_q, 
-                                max_iter=30, 
-                                device=self.device
-                            )
-                            
-                            bayesian_spawner.fit_with_ard(X_pure)
-                            
-                            #surviving_factors = (bayesian_spawner.alpha[0] < 1e4).sum().item()
-                            #print(f"ARD Spawner activated {surviving_factors} effective factors out of {global_q} available.")
-
-                            N_pure = X_pure.shape[0]
-                            new_S0 = torch.tensor([1.0], dtype=torch.float32, device=self.device)
-                            new_S1 = X_pure.mean(dim=0, keepdim=True)            
-                            new_S2 = (X_pure.T @ X_pure).unsqueeze(0) / N_pure  
-
-                            self.MFA.add_component(
-                                new_mu=bayesian_spawner.mu.data,
-                                new_Lambda=bayesian_spawner.Lambda.data, 
-                                new_log_psi=bayesian_spawner.log_psi.data,
-                                new_S0=new_S0,
-                                new_S1=new_S1,
-                                new_S2=new_S2
-                            )
-                            components_birthed += 1
-                        # ---------------------------------------------------------
-                
-                if components_birthed > 0:
-                    print(f"\nSuccessfully birthed {components_birthed} new components this cycle.")
-                    # 1. Evaluate the data on the updated MFA only ONCE after all new components are added
-                    with torch.no_grad():
-                        log_resp_norm_new_data, _, log_probs_new, _ = self.MFA.e_step(X)
-                else:
-                    print(f"Clusters found, but none met the minimum size threshold ({MIN_PURE_PIXELS} pixels). Burning shelf.")
-
-            # Burn the shelf (happens regardless of whether components were birthed)
-            self.num_outliers_on_shelf = 0
-
-        # =====================================================================
-        # 3. ADD TO GLOBAL OUTLIER SHELF (If not full yet)
-        # =====================================================================
-        elif num_new_outliers > 0:
-            start_idx = self.num_outliers_on_shelf
-            space_left = self.outlier_update_treshold - self.num_outliers_on_shelf
-            to_add = min(num_new_outliers, space_left)
+                return
             
-            end_idx = start_idx + to_add
-            self.global_outliers_shelf[start_idx : end_idx] = X[outlier_mask][:to_add]
-            self.num_outliers_on_shelf += to_add
-                    
-        return
+            # Find all unique clusters and their sizes
+            valid_labels = labels_tensor[valid_mask]
+            unique_clusters, cluster_counts = torch.unique(valid_labels, return_counts=True)
+            
+            MIN_PURE_PIXELS = 2 * self.n_channels
+            
+            components_birthed = 0
+            
+            # Loop over clusters found by DBSCAN and check if they meet the minimum size threshold to be considered a pure material cluster
+            for cluster_idx, size in zip(unique_clusters, cluster_counts):
+                if size.item() >= MIN_PURE_PIXELS:
+                    pure_material_mask = (labels_tensor == cluster_idx)
+                    X_pure = X_outliers[pure_material_mask]
+                    print(f"\n--- Spawning Component for Cluster {cluster_idx.item()} ---")
+                    print(f"DBSCAN isolated {size.item()} pure pixels.") 
+                    global_q = self.MFA.q
 
+                    with torch.no_grad():
+                        bayesian_spawner = BayesianMFA_Initializer(
+                            n_components=1, 
+                            n_channels=self.MFA.D, 
+                            q_max=global_q, 
+                            max_iter=30, 
+                            device=self.device
+                        )
+                        
+                        bayesian_spawner.fit_with_ard(X_pure)
+                        
+                        N_pure = X_pure.shape[0]
+                        new_S0 = torch.tensor([1.0], dtype=torch.float32, device=self.device)
+                        new_S1 = X_pure.mean(dim=0, keepdim=True)            
+                        new_S2 = (X_pure.T @ X_pure).unsqueeze(0) / N_pure  
+                        
+                        self.MFA.add_component(
+                            new_mu=bayesian_spawner.mu.data,
+                            new_Lambda=bayesian_spawner.Lambda.data, 
+                            new_log_psi=bayesian_spawner.log_psi.data,
+                            new_S0=new_S0,
+                            new_S1=new_S1,
+                            new_S2=new_S2
+                        )
+                        components_birthed += 1
+                    # ---------------------------------------------------------
+            
+            if components_birthed > 0:
+                print(f"\nSuccessfully birthed {components_birthed} new components this cycle.")
+            else:
+                print(f"Clusters found, but none met the minimum size threshold ({MIN_PURE_PIXELS} pixels). Burning shelf.")
+            return
