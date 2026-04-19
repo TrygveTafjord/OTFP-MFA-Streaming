@@ -64,51 +64,74 @@ class MFA(nn.Module):
         log_likelihood = torch.logsumexp(log_resps, dim=1)
         log_resp_norm = log_resps - log_likelihood.unsqueeze(1)
         
-        # NEW: Return the distances alongside your existing outputs
         return log_resp_norm, log_likelihood, log_probs, mahalanobis_dists
 
     def m_step(self, X, resp):
-        N = X.shape[0]
+        N, D = X.shape
         Nk = resp.sum(dim=0) + 1e-10 
         
-        # 1. Update Pi
+        # 1. Update Global Mixing Weights (Pi)
         self.log_pi.data = torch.log(Nk / N)
         
-        # 2. Update Mu
         for k in range(self.K):
             resp_k = resp[:, k].unsqueeze(1) # (N, 1)
-            mu_k = (resp_k * X).sum(dim=0) / Nk[k]
-            self.mu.data[k] = mu_k
             
-            # 3. Update Lambda (Approximation via Weighted PCA)
-            diff = X - mu_k
-            S_k = (resp_k * diff).T @ diff / Nk[k]
+            # --- Extract current parameters for component k ---
+            L_k = self.Lambda[k]                      # (D, q)
+            mu_k = self.mu[k]                         # (D,)
+            psi_k = torch.exp(self.log_psi[k]) + 1e-6 # (D,)
+            inv_psi = 1.0 / psi_k                     # (D,)
             
-            try:
-                vals, vecs = torch.linalg.eigh(S_k)
-                idx = torch.argsort(vals, descending=True)
-                top_vals = vals[idx[:self.q]]
-                top_vecs = vecs[:, idx[:self.q]]
-                
-                top_vals = torch.clamp(top_vals, min=1e-6)
-                self.Lambda.data[k] = top_vecs * torch.sqrt(top_vals).unsqueeze(0)
-                
-                # CHANGE 3: Update Psi for this specific component!
-                # Psi_k is the diagonal of the residual covariance: diag(S_k - Lambda_k * Lambda_k^T)
-                L_k_updated = self.Lambda.data[k]
-                recon_cov = L_k_updated @ L_k_updated.T
-                
-                # Extract diagonals for the update
-                diag_S_k = torch.diagonal(S_k)
-                diag_recon = torch.diagonal(recon_cov)
-                
-                psi_update = diag_S_k - diag_recon
-                psi_update = torch.clamp(psi_update, min=1e-5) # Ensure strictly positive noise
-                
-                self.log_psi.data[k] = torch.log(psi_update)
-                
-            except Exception as e:
-                pass # Keep old Lambda and Psi if decomposition fails
+            # --- Local E-Step Moment Calculations ---
+            # M = I + L^T * Psi^{-1} * L
+            L_k_scaled = inv_psi.unsqueeze(1) * L_k                   
+            M = torch.eye(self.q, device=self.device) + L_k.T @ L_k_scaled
+            inv_M = torch.inverse(M)                                  
+            
+            # beta = M^{-1} * L^T * Psi^{-1}
+            beta = inv_M @ L_k_scaled.T                               # (q, D)
+            
+            # First Moment: E[z | x] = beta * (X - mu)
+            diff = X - mu_k                                           # (N, D)
+            Ez = diff @ beta.T                                        # (N, q)
+            
+            # Second Moment Summation: sum(h_ij * E[zz^T]) 
+            # Note: Var(z|x) elegantly reduces to exactly inv_M
+            sum_Ezz = Nk[k] * inv_M + Ez.T @ (resp_k * Ez)            # (q, q)
+            
+            # Augmented latent factor: Ez_tilde = [Ez, 1] 
+            ones = torch.ones(N, 1, device=self.device)
+            Ez_tilde = torch.cat([Ez, ones], dim=1)                   # (N, q+1)
+            
+            # sum_i h_{ij} E[z_tilde z_tilde^T] -> shape (q+1, q+1)
+            sum_h_Ez = (resp_k * Ez).sum(dim=0, keepdim=True).T       # (q, 1)
+            
+            top_row = torch.cat([sum_Ezz, sum_h_Ez], dim=1)           
+            bottom_row = torch.cat([sum_h_Ez.T, Nk[k].unsqueeze(0).unsqueeze(0)], dim=1) 
+            sum_E_ztilde_ztildeT = torch.cat([top_row, bottom_row], dim=0) # (q+1, q+1)
+            
+            # sum_i h_{ij} x_i Ez_tilde^T -> shape (D, q+1)
+            sum_x_Eztilde = (resp_k * X).T @ Ez_tilde                 # (D, q+1)
+            
+            # Lambda_tilde_new = sum_x_Eztilde @ inv(sum_E_ztilde_ztildeT)
+            Lambda_tilde_new = sum_x_Eztilde @ torch.inverse(sum_E_ztilde_ztildeT)       
+            
+            Lambda_new = Lambda_tilde_new[:, :self.q]                 # (D, q)
+            mu_new = Lambda_tilde_new[:, self.q]                      # (D,)
+            
+            # Psi_new = diag( sum_i h_ij (x_i x_i^T - Lambda_tilde_new E_ztilde_i x_i^T) ) / Nk[k]
+            diag_xx = (resp_k * X * X).sum(dim=0)                     # (D,)
+            
+            # The cross term simplifies to row-wise multiplication, avoiding O(D^2) memory allocations
+            diag_cross = (Lambda_tilde_new * sum_x_Eztilde).sum(dim=1) # (D,)
+            
+            psi_update = (diag_xx - diag_cross) / Nk[k]
+            psi_update = torch.clamp(psi_update, min=1e-5)
+            
+            self.Lambda.data[k] = Lambda_new
+            self.mu.data[k] = mu_new
+            self.log_psi.data[k] = torch.log(psi_update)
+
 
     def stepwise_em_update(self, X, log_resp):
         """

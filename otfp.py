@@ -129,12 +129,12 @@ class MFA_OTFP:
 
         # 3. ADD TO GLOBAL OUTLIER SHELF (If not full yet)
         elif num_new_outliers > 0:
+
             start_idx = self.num_outliers_on_shelf            
             end_idx = start_idx + num_new_outliers
             
             self.global_outliers_shelf[start_idx : end_idx] = X[outlier_mask][:num_new_outliers]
-            self.num_outliers_on_shelf += num_new_outliers
-                    
+            self.num_outliers_on_shelf += num_new_outliers            
         return
     
 
