@@ -37,7 +37,6 @@ class MFA_OTFP:
             X = torch.nn.functional.normalize(X, p=2, dim=1)
 
         with torch.no_grad():
-            #self.MFA.initialize_parameters(X)
             self.MFA.fit(X) 
             self.MFA.init_sufficient_statistics(X)
             
@@ -200,7 +199,6 @@ class MFA_OTFP:
                             new_S2=new_S2
                         )
                         components_birthed += 1
-                    # ---------------------------------------------------------
             
             if components_birthed > 0:
                 print(f"\nSuccessfully birthed {components_birthed} new components this cycle.")
