@@ -15,7 +15,7 @@ Q_MAX = 8
 
 # Data parameters 
 DATA_PRODUCT = DataProduct.L1B
-N_SAMPLES_FIRST_MODEL = 5000 
+N_SAMPLES_FIRST_MODEL = 10000 
 IMAGE_PATHS = glob.glob(f'data/training_{DATA_PRODUCT.value}/*.nc')
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -98,7 +98,7 @@ if __name__ == "__main__":
         s0_mass = MFA_OTFP_model.MFA.S0.detach().cpu().numpy()
         updates = MFA_OTFP_model.MFA.update_counts.detach().cpu().numpy()
     
-        for k in range(MFA_OTFP_model.MFA.K):
+        for k in range(int(MFA_OTFP_model.MFA.K)):
             print(f"  ▶ Component {k}:")
             print(f"    ├─ Mixing Weight (π)       : {pi_weights[k]:.2%}")
             print(f"    ├─ Effective Pixel Mass    : {s0_mass[k]:,.1f} (from S0)")
