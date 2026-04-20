@@ -185,19 +185,47 @@ class MFA_OTFP:
                         
                         bayesian_spawner.fit_with_ard(X_pure)
                         
+                        # Extract parameters from the spawner (Assuming spawner K=1)
+                        L_new = bayesian_spawner.Lambda.data[0] 
+                        mu_new = bayesian_spawner.mu.data[0]
+                        psi_new = torch.exp(bayesian_spawner.log_psi.data[0]) + 1e-6
+                        inv_psi = 1.0 / psi_new
+                        
+                        # Calculate latent moments for the pure cluster
+                        L_scaled = inv_psi.unsqueeze(1) * L_new
+                        M = torch.eye(int(global_q), device=self.device) + L_new.T @ L_scaled
+                        inv_M = torch.inverse(M)
+                        beta = inv_M @ L_scaled.T
+                        
                         N_pure = X_pure.shape[0]
+                        diff = X_pure - mu_new
+                        Ez = diff @ beta.T
+                        ones = torch.ones(N_pure, 1, device=self.device)
+                        Ez_tilde = torch.cat([Ez, ones], dim=1)
+                        
+                        # Summate moments (Responsibility = 1 for pure pixels)
+                        sum_Ezz = N_pure * inv_M + Ez.T @ Ez
+                        sum_h_Ez = Ez.sum(dim=0, keepdim=True).T
+                        
+                        top_row = torch.cat([sum_Ezz, sum_h_Ez], dim=1)
+                        bottom_row = torch.cat([sum_h_Ez.T, torch.tensor([[N_pure]], dtype=torch.float32, device=self.device)], dim=1)
+                        
+                        # Create properly dimensioned tensors (1, ...) to concatenate in add_component
                         new_S0 = torch.tensor([1.0], dtype=torch.float32, device=self.device)
-                        new_S1 = X_pure.mean(dim=0, keepdim=True)            
-                        new_S2 = (X_pure.T @ X_pure).unsqueeze(0) / N_pure  
+                        new_S_Ezz = torch.cat([top_row, bottom_row], dim=0).unsqueeze(0) / N_pure
+                        new_S_xEz = (X_pure.T @ Ez_tilde).unsqueeze(0) / N_pure
+                        new_S_xx_diag = (X_pure * X_pure).sum(dim=0, keepdim=True) / N_pure
                         
                         self.MFA.add_component(
                             new_mu=bayesian_spawner.mu.data,
                             new_Lambda=bayesian_spawner.Lambda.data, 
                             new_log_psi=bayesian_spawner.log_psi.data,
                             new_S0=new_S0,
-                            new_S1=new_S1,
-                            new_S2=new_S2
+                            new_S_xEz=new_S_xEz,
+                            new_S_Ezz=new_S_Ezz,
+                            new_S_xx_diag=new_S_xx_diag
                         )
+
                         components_birthed += 1
             
             if components_birthed > 0:

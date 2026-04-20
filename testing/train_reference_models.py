@@ -20,7 +20,7 @@ data_dir = glob.glob(f'./data/training_{data_product.value}/*.nc')
 print(f"Found {len(data_dir)} files.")
 
 
-target_total_samples = 2000000
+target_total_samples = 200000
 
 start_time = time.perf_counter()
 
@@ -42,8 +42,6 @@ print(f"Shape of X: {X.shape}")
 
 mfa_model = MFA(n_components=K, n_channels=X.shape[1], n_factors=q)
 
-print("Initializing MFA")
-mfa_model.initialize_parameters(X)
 print("Training MFA")
 
 mfa_model.fit(X)
