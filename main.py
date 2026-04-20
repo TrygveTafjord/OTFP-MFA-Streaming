@@ -47,9 +47,11 @@ if __name__ == "__main__":
     queue = Queue(maxsize=200) 
 
     # Start the producer thread
+    camera_Hz = 22 #We assume we can batch 22 lines of data at a time, which corresponds to 1 second of flight. This can be adjusted based on actual data and performance needs.
+
     producer_thread = Process(
         target=producer, 
-        args=(IMAGE_PATHS, queue, DATA_PRODUCT, 2000),
+        args=(IMAGE_PATHS, queue, DATA_PRODUCT, camera_Hz),
         daemon=True
     )
     producer_thread.start()
