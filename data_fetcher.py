@@ -10,7 +10,7 @@ class DataProduct(Enum):
     L1B = 'l1b'
     L1D = 'l1d'
 
-def producer(file_list : list[str], data_queue : Queue, data_product : DataProduct, batch_size : int):
+def producer(file_list : list[str], data_queue : Queue, data_product : DataProduct, batch_frames : int):
     """
     Reads data from files and puts slices into the queue for the consumer to process.
     Args: 
@@ -32,22 +32,17 @@ def producer(file_list : list[str], data_queue : Queue, data_product : DataProdu
 
     for file_path in file_list:
         satobj = Hypso(file_path)
-        
         cube = getattr(satobj, cube_attr_name, None)
-        if cube is None:
-            print(f"Skipping {file_path}: Missing {cube_attr_name} data.")
-            continue
+        if cube is None: continue
 
-        pixels = cube.values.astype(np.float32)
+        pixels = cube.values.astype(np.float32) # Native shape: (h, w, b) e.g., (Length, 684, 120)
         h, w, b = pixels.shape
-        pixels_2d = pixels.reshape(-1, b) # Shape: (Total_Pixels_In_Image, 120)
 
-        for i in range(0, pixels_2d.shape[0], batch_size):
-            batch = pixels_2d[i:i+batch_size]
-            #batch_tensor = torch.tensor(batch, dtype=torch.float32)
-            data_queue.put(batch)
+        # Yield chunks of physical flight lines (e.g., 22 lines = 1 second of flight)
+        for i in range(0, h, batch_frames):
+            batch_3d = pixels[i : i + batch_frames, :, :] 
+            data_queue.put(batch_3d)
                 
-    # Send a "done" signal
     data_queue.put("FINISHED")
 
 

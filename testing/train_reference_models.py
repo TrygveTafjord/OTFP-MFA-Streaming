@@ -42,8 +42,6 @@ print(f"Shape of X: {X.shape}")
 
 mfa_model = MFA(n_components=K, n_channels=X.shape[1], n_factors=q)
 
-print("Initializing MFA")
-mfa_model.initialize_parameters(X)
 print("Training MFA")
 
 mfa_model.fit(X)

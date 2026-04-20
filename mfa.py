@@ -76,13 +76,11 @@ class MFA(nn.Module):
         for k in range(self.K):
             resp_k = resp[:, k].unsqueeze(1) # (N, 1)
             
-            # --- Extract current parameters for component k ---
             L_k = self.Lambda[k]                      # (D, q)
             mu_k = self.mu[k]                         # (D,)
             psi_k = torch.exp(self.log_psi[k]) + 1e-6 # (D,)
             inv_psi = 1.0 / psi_k                     # (D,)
             
-            # --- Local E-Step Moment Calculations ---
             # M = I + L^T * Psi^{-1} * L
             L_k_scaled = inv_psi.unsqueeze(1) * L_k                   
             M = torch.eye(self.q, device=self.device) + L_k.T @ L_k_scaled
@@ -96,7 +94,7 @@ class MFA(nn.Module):
             Ez = diff @ beta.T                                        # (N, q)
             
             # Second Moment Summation: sum(h_ij * E[zz^T]) 
-            # Note: Var(z|x) elegantly reduces to exactly inv_M
+            # Var(z|x) elegantly reduces to exactly inv_M
             sum_Ezz = Nk[k] * inv_M + Ez.T @ (resp_k * Ez)            # (q, q)
             
             # Augmented latent factor: Ez_tilde = [Ez, 1] 
