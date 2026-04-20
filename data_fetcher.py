@@ -13,17 +13,13 @@ class DataProduct(Enum):
 def producer(file_list : list[str], data_queue : Queue, data_product : DataProduct, batch_frames : int):
     """
     Reads data from files and puts slices into the queue for the consumer to process.
-    Args: 
-    file_list (list[str]): List of file paths to read data from.
-    data_queue (Queue): A thread-safe queue to put the data slices into.
-    data_product (DataProduct): Enum indicating which data product to read (L1A, L1B, or L1D).
     """
-    print(  f"Total files to process: {len(file_list)}"  )
+    print(f"Total files to process: {len(file_list)}")
 
     product_to_attr = {
-    DataProduct.L1A: "l1a_cube",
-    DataProduct.L1B: "l1b_cube",
-    DataProduct.L1D: "l1d_cube"
+        DataProduct.L1A: "l1a_cube",
+        DataProduct.L1B: "l1b_cube",
+        DataProduct.L1D: "l1d_cube"
     }
 
     cube_attr_name = product_to_attr.get(data_product)
@@ -35,16 +31,28 @@ def producer(file_list : list[str], data_queue : Queue, data_product : DataProdu
         cube = getattr(satobj, cube_attr_name, None)
         if cube is None: continue
 
-        pixels = cube.values.astype(np.float32) # Native shape: (h, w, b) e.g., (Length, 684, 120)
-        h, w, b = pixels.shape
+        # pixels is a NumPy array of shape (h, w, d)
+        pixels = cube.values.astype(np.float32) 
+        h, w, d = pixels.shape
 
-        # Yield chunks of physical flight lines (e.g., 22 lines = 1 second of flight)
+        # Loop through the image in chunks of `batch_frames`
         for i in range(0, h, batch_frames):
-            batch_3d = pixels[i : i + batch_frames, :, :] 
-            data_queue.put(batch_3d)
+            
+            # 1. Grab the 3D batch: shape (batch_frames, w, d)
+            # Note: The last batch might be smaller than batch_frames, which is fine!
+            batch_3d = pixels[i : i + batch_frames, :, :]
+            
+            # 2. Get the actual number of lines in this specific chunk
+            current_batch_lines = batch_3d.shape[0]
+            
+            # 3. Use NumPy's .reshape() to flatten the spatial dimensions!
+            # Shape becomes (current_batch_lines * w, d)
+            projection_data_flat = batch_3d.reshape(current_batch_lines * w, d)
+            
+            # 4. Put the flattened 2D batch into the queue
+            data_queue.put(projection_data_flat)
                 
     data_queue.put("FINISHED")
-
 
 def fetch_init_data(file_list : list[str], n_target_samples : int, data_product : DataProduct):
     """
