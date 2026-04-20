@@ -42,15 +42,12 @@ print(f"Shape of X: {X.shape}")
 
 mfa_model = MFA(n_components=K, n_channels=X.shape[1], n_factors=q)
 
-print("Initializing MFA")
-mfa_model.initialize_parameters(X)
 print("Training MFA")
 
 mfa_model.fit(X)
 end_time = time.perf_counter()
 training_time = end_time - start_time 
 print(f"Training time was: {training_time}s")
-
 
 # Clean up memory if using GPU
 if device.type == 'cuda':
