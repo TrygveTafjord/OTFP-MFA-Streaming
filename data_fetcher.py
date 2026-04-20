@@ -35,10 +35,9 @@ def producer(file_list : list[str], data_queue : Queue, data_product : DataProdu
         cube = getattr(satobj, cube_attr_name, None)
         if cube is None: continue
 
-        pixels = cube.values.astype(np.float32) # Native shape: (h, w, b) e.g., (Length, 684, 120)
+        pixels = cube.values.astype(np.float32)
         h, w, b = pixels.shape
 
-        # Yield chunks of physical flight lines (e.g., 22 lines = 1 second of flight)
         for i in range(0, h, batch_frames):
             batch_3d = pixels[i : i + batch_frames, :, :] 
             data_queue.put(batch_3d)
