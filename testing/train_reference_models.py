@@ -49,7 +49,6 @@ end_time = time.perf_counter()
 training_time = end_time - start_time 
 print(f"Training time was: {training_time}s")
 
-
 # Clean up memory if using GPU
 if device.type == 'cuda':
     torch.cuda.empty_cache()
