@@ -39,7 +39,7 @@ class BayesianMFA_Initializer(MFA): # Inherit from MFA!
             # 4. Check for convergence
             current_ll = log_likelihood.mean().item()
             if i > 0 and abs(current_ll - prev_ll) < self.tol:
-                print(f"Bayesian Initialization converged at iteration {i}.")
+                #print(f"Bayesian Initialization converged at iteration {i}.")
                 break
             prev_ll = current_ll
 
