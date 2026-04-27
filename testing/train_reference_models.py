@@ -6,8 +6,8 @@ import time
 import os
 
 data_product = DataProduct.L1B
-K = 9  # Number of MFA compobnents to use 
-q = 5  # Latent dimensionality for MFA
+K = 7  # Number of MFA compobnents to use 
+q = 4  # Latent dimensionality for MFA
 Train_PCA_on_L2Normalized = False
 Train_MFA_on_L2Normalized = True
 
@@ -53,7 +53,7 @@ print(f"Training time was: {training_time}s")
 if device.type == 'cuda':
     torch.cuda.empty_cache()
 
-# 2. Build the state dictionary
+# Build the state dictionary
 mfa_state = {
     'model_state_dict': mfa_model.state_dict(), 
     

@@ -53,8 +53,7 @@ class MFA_OTFP:
         
         print(f"Starting Bayesian model selection with K_max={K_max}, q_max={q_max}...")
         
-        # 2. Instantiate the Bayesian Initializer
-        # (Assuming BayesianMFA_Initializer is imported from mfa.py)
+        # Instantiate the Bayesian Initializer
         bayesian_initializer = BayesianMFA_Initializer(
             n_components=K_max, 
             n_channels=n_channels, 
@@ -62,10 +61,10 @@ class MFA_OTFP:
             device=self.device
         )
         
-        # 3. Fit the model to the initial shelf/batch of data
+        # Fit the model to the initial shelf/batch of data
         bayesian_initializer.fit_with_ard(data)
         
-        # 4. Extract the surviving K and q
+        # Extract the surviving K and q
         with torch.no_grad():
             # Find K: Components whose mixing weights (pi) didn't shrink to zero
             pi_threshold = 1e-3
@@ -79,7 +78,6 @@ class MFA_OTFP:
                 # Get the active factors only for the surviving components
                 active_q_per_component = (bayesian_initializer.alpha[active_components] < alpha_threshold).sum(dim=1)
                 
-                # Your standard MFA class expects a single global q. 
                 # Taking the max ensures no component is starved of latent capacity.
                 optimal_q = active_q_per_component.max().item()
             else:

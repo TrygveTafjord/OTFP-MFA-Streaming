@@ -40,10 +40,10 @@ class MFA(nn.Module):
         with torch.no_grad():
             for i in range(self.max_iter):
                 
-                log_resp, log_likelihood, _ , _= self.e_step(X)
+                log_resp_norm, log_likelihood, _ , _= self.e_step(X)
                 current_ll = log_likelihood.mean()
                 
-                resp = torch.exp(log_resp) # (N, K)
+                resp = torch.exp(log_resp_norm) # (N, K)
                 self.m_step(X, resp)
                 
                 # Convergence check
@@ -63,7 +63,6 @@ class MFA(nn.Module):
         -Raw geometric fits.
         """
         log_probs, mahalanobis_dists = self.compute_distances_and_log_probs(X)
-        
         log_resps = log_probs + self.log_pi.unsqueeze(0)
         log_likelihood = torch.logsumexp(log_resps, dim=1)
         log_resp_norm = log_resps - log_likelihood.unsqueeze(1)
@@ -105,7 +104,7 @@ class MFA(nn.Module):
             ones = torch.ones(N, 1, device=self.device)
             Ez_tilde = torch.cat([Ez, ones], dim=1)                   # (N, q+1)
             
-            # sum_i h_{ij} E[z_tilde z_tilde^T] -> shape (q+1, q+1)
+            # sum_i h_{ij} E[z_tilde z_tilde^T]
             sum_h_Ez = (resp_k * Ez).sum(dim=0, keepdim=True).T       # (q, 1)
             
             top_row = torch.cat([sum_Ezz, sum_h_Ez], dim=1)           
@@ -281,7 +280,7 @@ class MFA(nn.Module):
             N_pure = X_pure.shape[0]
             q_new = new_Lambda.shape[2]
             
-            # 1. Calculate Scaled Sufficient Statistics Internally
+            # Calculate Scaled Sufficient Statistics Internally
             new_S0 = torch.tensor([N_pure / max(total_samples_seen, 1)], dtype=torch.float32, device=self.device)
             new_S1 = new_S0 * X_pure.mean(dim=0, keepdim=True)            
             new_S_xx = new_S0 * (X_pure ** 2).mean(dim=0, keepdim=True) 
@@ -290,7 +289,7 @@ class MFA(nn.Module):
             new_S_xz = torch.zeros((1, self.D, q_new), device=self.device)
             new_S_zz = new_S0 * torch.eye(q_new, device=self.device).unsqueeze(0) 
 
-            # 2. Handle Tensor Shape Matching (Padding Lambda and Latent Statistics)
+            # Handle Tensor Shape Matching (Padding Lambda and Latent Statistics)
             if q_new < self.q:
                 pad_size = self.q - q_new
                 new_Lambda = torch.nn.functional.pad(new_Lambda, (0, pad_size))
@@ -307,12 +306,12 @@ class MFA(nn.Module):
                 
                 self.q = q_new
 
-            # 3. Concatenate the standard parameters safely
+            # Concatenate the standard parameters safely
             self.mu = nn.Parameter(torch.cat([self.mu.data, new_mu], dim=0))
             self.Lambda = nn.Parameter(torch.cat([self.Lambda.data, new_Lambda], dim=0))
             self.log_psi = nn.Parameter(torch.cat([self.log_psi.data, new_log_psi], dim=0))
 
-            # 4. Concatenate the Sufficient Statistics
+            # Concatenate the Sufficient Statistics
             self.S0 = torch.cat([self.S0, new_S0])
             self.S1 = torch.cat([self.S1, new_S1])
             self.S_xx = torch.cat([self.S_xx, new_S_xx])
@@ -320,10 +319,10 @@ class MFA(nn.Module):
             self.S_xz = torch.cat([self.S_xz, new_S_xz])
             self.S_zz = torch.cat([self.S_zz, new_S_zz])
             
-            # 5. Initialize the update count to 1
+            # Initialize the update count to 1
             self.update_counts = torch.cat([self.update_counts, torch.tensor([1.0], device=self.device)])
 
-            # 6. Automatically update global mixing weights (log_pi)
+            # Automatically update global mixing weights (log_pi)
             self.log_pi = nn.Parameter(torch.log(self.S0 / self.S0.sum() + 1e-10))
 
             self.K += 1
@@ -346,8 +345,9 @@ class MFA(nn.Module):
                     continue # Skip empty/dead components
                     
                 resp_k = resp[:, k].unsqueeze(1) # (N, 1)
+                resp_k_sum = resp_k.sum()        # Fix for Flaw 4: Safely sum current responsibilities
                 
-                # --- E-STEP to recover latent expectations for initialization ---
+                # E-STEP to recover latent expectations for initialization 
                 L_k = self.Lambda[k]                      
                 mu_k = self.mu[k]                         
                 inv_psi = 1.0 / (torch.exp(self.log_psi[k]) + 1e-6) 
@@ -360,15 +360,13 @@ class MFA(nn.Module):
                 diff = X - mu_k                                           
                 Ez = diff @ beta.T                                        # E[z|x] -> (N, q)
                 
-                # --- Initialize Latent Sufficient Statistics ---
+                # Initialize Latent Sufficient Statistics 
                 self.S_z[k] = (resp_k * Ez).sum(dim=0) / N                   # (q,)
                 self.S_xz[k] = ((resp_k * X).T @ Ez) / N                     # (D, q)
                 
-                # E[zz^T|x] summation
-                sum_Ezz = (self.S0[k] * N) * inv_M + Ez.T @ (resp_k * Ez)
+                # E[zz^T|x] summation: FIXED
+                sum_Ezz = resp_k_sum * inv_M + Ez.T @ (resp_k * Ez)
                 self.S_zz[k] = sum_Ezz / N                                   # (q, q)
             
             self.update_counts = torch.ones(self.K, device=self.device)
-    
-    
     
