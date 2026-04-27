@@ -220,56 +220,55 @@ class MFA(nn.Module):
     def compute_distances_and_log_probs(self, X):
         """
         Calculates the pure structural/geometric fit using the Woodbury Matrix Identity
-        to avoid O(D^3) inversion of the 120x120 covariance matrix.
-        This calculates log P(x_i | w_j) and entirely ignores the global mixing weights (pi).
+        to avoid O(D^3) inversion. 
+        Fully vectorized across all K components to eliminate Python loops.
         """
         N, D = X.shape
-        log_probs = []
-        mahalanobis_dists = []
-        
-        # Constant term for the log pdf
         c = D * math.log(2 * math.pi)
         
-        for k in range(self.K):
-            L_k = self.Lambda[k]                     # (D, q)
-            psi_k = torch.exp(self.log_psi[k]) + 1e-6 # (D,)
-            inv_psi = 1.0 / psi_k                    # (D,)
-            
-            # 1. Calculate the q x q inner matrix: M = I + Lambda^T * Psi^{-1} * Lambda
-            # Since Psi is diagonal, Psi^{-1} * Lambda is just row-wise multiplication
-            L_k_scaled = inv_psi.unsqueeze(1) * L_k  # (D, q)
-            M = torch.eye(self.q, device=self.device) + L_k.T @ L_k_scaled # (q, q)
-            
-            # Invert the tiny q x q matrix
-            inv_M = torch.inverse(M)                 # (q, q)
-            
-            # 2. Calculate the Log Determinant using the determinant lemma:
-            # |C| = |Psi| * |M|
-            log_det_psi = torch.sum(torch.log(psi_k))
-            log_det_M = torch.logdet(M)
-            log_det_C = log_det_psi + log_det_M
-            
-            # 3. Calculate Mahalanobis distance: (x-mu)^T C^{-1} (x-mu)
-            diff = X - self.mu[k]                    # (N, D)
-            
-            # Term 1: diff^T * Psi^{-1} * diff
-            term1 = torch.sum((diff ** 2) * inv_psi, dim=1) # (N,)
-            
-            # Term 2: diff^T * Psi^{-1} * Lambda * M^{-1} * Lambda^T * Psi^{-1} * diff
-            # Let proj = diff * Psi^{-1} * Lambda
-            proj = diff @ L_k_scaled                 # (N, q)
-            term2 = torch.sum((proj @ inv_M) * proj, dim=1) # (N,)
-            
-            mahalanobis = term1 - term2              # (N,)
-            mahalanobis_dists.append(mahalanobis)
-
-            # 4. Final Log PDF
-            log_prob = -0.5 * (c + log_det_C + mahalanobis)
-            log_probs.append(log_prob)
-
-            # Mahalanobis distances can be useful for OTFP drift detection, so we store them as well
-                
-        return torch.stack(log_probs, dim=1), torch.stack(mahalanobis_dists, dim=1) # NEW: Return both    
+        # 1. Prepare component-specific variances
+        psi = torch.exp(self.log_psi) + 1e-6            # (K, D)
+        inv_psi = 1.0 / psi                             # (K, D)
+        
+        # 2. Scale factor loadings for all K
+        # self.Lambda is (K, D, q), inv_psi is (K, D)
+        L_scaled = inv_psi.unsqueeze(-1) * self.Lambda  # (K, D, q)
+        
+        # 3. Compute M = I + Lambda^T * Psi^{-1} * Lambda for all K
+        M_inner = self.Lambda.mT @ L_scaled             # (K, q, q)
+        M = torch.eye(self.q, device=self.device).expand(self.K, -1, -1) + M_inner
+        inv_M = torch.inverse(M)                        # (K, q, q)
+        
+        # 4. Compute Log Determinants for all K
+        log_det_psi = torch.sum(torch.log(psi), dim=1)  # (K,)
+        log_det_M = torch.logdet(M)                     # (K,)
+        log_det_C = log_det_psi + log_det_M             # (K,)
+        
+        # 5. Compute Term 1 of Mahalanobis distance
+        # To avoid creating a massive (N, K, D) tensor for (X - mu), we mathematically
+        # expand the squared difference: (x - mu)^2 / psi = (x^2 / psi) - (2x * mu / psi) + (mu^2 / psi)
+        X_sq = X ** 2                                   # (N, D)
+        T1_A = X_sq @ inv_psi.T                         # (N, K)
+        T1_B = X @ (self.mu * inv_psi).T                # (N, K)
+        T1_C = torch.sum((self.mu ** 2) * inv_psi, dim=1) # (K,)
+        
+        term1 = T1_A - 2 * T1_B + T1_C                  # (N, K)
+        
+        # 6. Compute Term 2 using batched projections
+        # proj = (X - mu) @ L_scaled 
+        X_proj = torch.einsum('nd,kdq->nkq', X, L_scaled)       # (N, K, q)
+        mu_proj = torch.einsum('kd,kdq->kq', self.mu, L_scaled) # (K, q)
+        proj = X_proj - mu_proj.unsqueeze(0)                    # (N, K, q)
+        
+        # term2 = proj @ inv_M @ proj^T
+        proj_invM = torch.einsum('nkq,kqr->nkr', proj, inv_M)   # (N, K, q)
+        term2 = torch.sum(proj_invM * proj, dim=2)              # (N, K)
+        
+        # 7. Final outputs
+        mahalanobis = term1 - term2                                     # (N, K)
+        log_probs = -0.5 * (c + log_det_C.unsqueeze(0) + mahalanobis)   # (N, K)
+        
+        return log_probs, mahalanobis
         
     def add_component(self, X_pure, total_samples_seen, new_mu, new_Lambda, new_log_psi):
         """
