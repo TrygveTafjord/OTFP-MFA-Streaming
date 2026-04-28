@@ -1,1 +1,0 @@
-In this version, the bug in the sEM function is fixed such that each local component has strictly q number of loadings

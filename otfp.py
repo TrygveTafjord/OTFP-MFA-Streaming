@@ -53,8 +53,7 @@ class MFA_OTFP:
         
         print(f"Starting Bayesian model selection with K_max={K_max}, q_max={q_max}...")
         
-        # 2. Instantiate the Bayesian Initializer
-        # (Assuming BayesianMFA_Initializer is imported from mfa.py)
+        # Instantiate the Bayesian Initializer
         bayesian_initializer = BayesianMFA_Initializer(
             n_components=K_max, 
             n_channels=n_channels, 
@@ -62,10 +61,10 @@ class MFA_OTFP:
             device=self.device
         )
         
-        # 3. Fit the model to the initial shelf/batch of data
+        # Fit the model to the initial shelf/batch of data
         bayesian_initializer.fit_with_ard(data)
         
-        # 4. Extract the surviving K and q
+        # Extract the surviving K and q
         with torch.no_grad():
             # Find K: Components whose mixing weights (pi) didn't shrink to zero
             pi_threshold = 1e-3
@@ -79,7 +78,6 @@ class MFA_OTFP:
                 # Get the active factors only for the surviving components
                 active_q_per_component = (bayesian_initializer.alpha[active_components] < alpha_threshold).sum(dim=1)
                 
-                # Your standard MFA class expects a single global q. 
                 # Taking the max ensures no component is starved of latent capacity.
                 optimal_q = active_q_per_component.max().item()
             else:
@@ -126,7 +124,7 @@ class MFA_OTFP:
             self.num_outliers_on_shelf = 0
 
 
-        # 3. ADD TO GLOBAL OUTLIER SHELF (If not full yet)
+        # 3. ADD TO GLOBAL OUTLIER SHELF
         elif num_new_outliers > 0:
 
             start_idx = self.num_outliers_on_shelf            
@@ -162,7 +160,6 @@ class MFA_OTFP:
             unique_clusters, cluster_counts = torch.unique(valid_labels, return_counts=True)
             
             MIN_PURE_PIXELS = 2 * self.n_channels
-            
             components_birthed = 0
             
             # Loop over clusters found by DBSCAN and check if they meet the minimum size threshold to be considered a pure material cluster
@@ -170,8 +167,6 @@ class MFA_OTFP:
                 if size.item() >= MIN_PURE_PIXELS:
                     pure_material_mask = (labels_tensor == cluster_idx)
                     X_pure = X_outliers[pure_material_mask]
-                    print(f"\n--- Spawning Component for Cluster {cluster_idx.item()} ---")
-                    print(f"DBSCAN isolated {size.item()} pure pixels.") 
                     global_q = self.MFA.q
 
                     with torch.no_grad():
@@ -185,18 +180,12 @@ class MFA_OTFP:
                         
                         bayesian_spawner.fit_with_ard(X_pure)
                         
-                        N_pure = X_pure.shape[0]
-                        new_S0 = torch.tensor([1.0], dtype=torch.float32, device=self.device)
-                        new_S1 = X_pure.mean(dim=0, keepdim=True)            
-                        new_S2 = (X_pure.T @ X_pure).unsqueeze(0) / N_pure  
-                        
                         self.MFA.add_component(
+                            X_pure=X_pure,
+                            total_samples_seen=self.n_samples_seen,
                             new_mu=bayesian_spawner.mu.data,
                             new_Lambda=bayesian_spawner.Lambda.data, 
-                            new_log_psi=bayesian_spawner.log_psi.data,
-                            new_S0=new_S0,
-                            new_S1=new_S1,
-                            new_S2=new_S2
+                            new_log_psi=bayesian_spawner.log_psi.data
                         )
                         components_birthed += 1
             

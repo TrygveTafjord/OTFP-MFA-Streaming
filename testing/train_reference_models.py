@@ -20,7 +20,7 @@ data_dir = glob.glob(f'./data/training_{data_product.value}/*.nc')
 print(f"Found {len(data_dir)} files.")
 
 
-target_total_samples = 2000000
+target_total_samples = 200000
 
 start_time = time.perf_counter()
 
@@ -53,7 +53,7 @@ print(f"Training time was: {training_time}s")
 if device.type == 'cuda':
     torch.cuda.empty_cache()
 
-# 2. Build the state dictionary
+# Build the state dictionary
 mfa_state = {
     'model_state_dict': mfa_model.state_dict(), 
     
