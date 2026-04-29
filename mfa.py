@@ -25,7 +25,7 @@ class MFA(nn.Module):
         # We use register_buffer so they are saved in the state_dict but aren't trainable parameters
         self.register_buffer('S0', torch.zeros(self.K, device=self.device))
         self.register_buffer('S1', torch.zeros(self.K, self.D, device=self.device))
-        self.register_buffer('S_xx', torch.zeros(self.K, self.D, device=self.device))      # Diagonal only!
+        self.register_buffer('S_xx', torch.zeros(self.K, self.D, device=self.device))      
         self.register_buffer('S_z', torch.zeros(self.K, self.q, device=self.device))
         self.register_buffer('S_xz', torch.zeros(self.K, self.D, self.q, device=self.device))
         self.register_buffer('S_zz', torch.zeros(self.K, self.q, self.q, device=self.device))
@@ -150,7 +150,7 @@ class MFA(nn.Module):
             
             resp_k = resp[:, k].unsqueeze(1) # (N, 1)
 
-            # --- E-STEP for Latent Variables ---
+            # E-STEP for Latent Variables
             L_k = self.Lambda[k]                      
             mu_k = self.mu[k]                         
             inv_psi = 1.0 / (torch.exp(self.log_psi[k]) + 1e-6) 
@@ -163,7 +163,7 @@ class MFA(nn.Module):
             diff = X - mu_k                                           
             Ez = diff @ beta.T                                        # E[z|x] -> (N, q)
 
-            # --- Calculate Batch Sufficient Statistics ---
+            # Calculate Batch Sufficient Statistics
             sz_batch = (resp_k * Ez).sum(dim=0) / N                   # (q,)
             sxz_batch = ((resp_k * X).T @ Ez) / N                     # (D, q)
 
@@ -171,7 +171,7 @@ class MFA(nn.Module):
             sum_Ezz = (s0_batch[k] * N) * inv_M + Ez.T @ (resp_k * Ez)
             szz_batch = sum_Ezz / N                                   # (q, q)
 
-            # --- Interpolate Global Sufficient Statistics ---
+            # Interpolate Global Sufficient Statistics 
             k_count = self.update_counts[k].item()
             eta = (k_count + 2) ** (-self.alpha)
 
@@ -192,29 +192,33 @@ class MFA(nn.Module):
 
             self.update_counts[k] += 1
 
-            # --- M-STEP: Recover Parameters ---
+            # M-STEP: Recover Parameters 
             self.log_pi.data = torch.log(self.S0 / self.S0.sum() + 1e-10)
 
-            mu_k_new = self.S1[k] / (self.S0[k] + 1e-10)
-            self.mu.data[k] = mu_k_new
+            # 1. Calculate weighted component averages
+            x_bar = self.S1[k] / (self.S0[k] + 1e-10)      # (D,)
+            z_bar = self.S_z[k] / (self.S0[k] + 1e-10)     # (q,)
 
-            # Exact Lambda update: (S_xz - mu * S_z^T) * S_zz^-1
-            S_z_scaled = self.S_z[k].unsqueeze(0) # (1, q)
-            mu_k_col = mu_k_new.unsqueeze(1)      # (D, 1)
+            # 2. Compute centered cross-covariance and auto-covariance
+            S_xz_centered = (self.S_xz[k] / (self.S0[k] + 1e-10)) - torch.outer(x_bar, z_bar)
+            S_zz_centered = (self.S_zz[k] / (self.S0[k] + 1e-10)) - torch.outer(z_bar, z_bar)
 
-            lambda_num = self.S_xz[k] - (mu_k_col @ S_z_scaled)
-            Lambda_new = lambda_num @ torch.inverse(self.S_zz[k] + torch.eye(self.q, device=self.device)*1e-6)
+            # 3. Exact Lambda update (Centered Regression)
+            Lambda_new = S_xz_centered @ torch.inverse(S_zz_centered + torch.eye(self.q, device=self.device)*1e-6)
             self.Lambda.data[k] = Lambda_new
 
-            # Exact Psi update (diagonal only)
-            diag_cross = (Lambda_new * lambda_num).sum(dim=1)
+            # 4. Exact Mu update (Intercept compensation)
+            # Solves Equation 2: mu = (S1 - Lambda * Sz) / S0
+            mu_k_new = x_bar - (Lambda_new @ z_bar)
+            self.mu.data[k] = mu_k_new
 
-            # Add a ridge penalty (Tikhonov regularization) to prevent variance collapse
+            # 5. Exact Psi update (Diagonal only)
+            # Derived by expanding sum(h * (xx^T - Lambda * z * x^T - mu * x^T))
+            diag_cross = (Lambda_new * self.S_xz[k]).sum(dim=1) 
+            
             ridge_penalty = 1e-6 
+            psi_update = (self.S_xx[k] - diag_cross - (mu_k_new * self.S1[k]) + ridge_penalty) / (self.S0[k] + 1e-10)
 
-            psi_update = (self.S_xx[k] - (mu_k_new * self.S1[k]) - diag_cross + ridge_penalty) / (self.S0[k] + 1e-10)
-
-            # You can keep the clamp as an absolute fail-safe
             self.log_psi.data[k] = torch.log(torch.clamp(psi_update, min=1e-5))
     
     def compute_distances_and_log_probs(self, X):
@@ -302,7 +306,6 @@ class MFA(nn.Module):
                 self.S_z = torch.nn.functional.pad(self.S_z, (0, pad_size))
                 self.S_xz = torch.nn.functional.pad(self.S_xz, (0, pad_size))
                 self.S_zz = torch.nn.functional.pad(self.S_zz, (0, pad_size, 0, pad_size))
-                
                 self.q = q_new
 
             # Concatenate the standard parameters safely
