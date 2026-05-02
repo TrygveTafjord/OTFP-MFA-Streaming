@@ -111,7 +111,7 @@ class MFA_OTFP:
         # 1. TRACK INLIERS & CATCH LOCAL DRIFTERS
         if inlier_mask.any():
                 X_inliers = X[inlier_mask]
-                #self._process_inliners(X_inliers)
+                self._process_inliners(X_inliers)
 
         # 2. GLOBAL OUTLIER SHELF & COMPONENT BIRTHING
         if num_new_outliers + self.num_outliers_on_shelf > self.outlier_update_treshold:
