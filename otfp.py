@@ -5,16 +5,17 @@ from bayesian_model_selector import BayesianMFA_Initializer
 from sklearn.cluster import DBSCAN
 
 class MFA_OTFP:
-    def __init__(self, init_data: torch.Tensor, n_channels: int, device: str, outlier_update_treshold: int, L2_normalization: bool = True, q_max: int = 5):
+    def __init__(self, init_data: torch.Tensor, n_channels: int, device: str, outlier_update_treshold: int, L2_normalization: bool = True, q_max: int = 8, K_max: int = 20):
         # System hyperparameters
         self.device = device
         self.n_channels = n_channels
         self.q_max = q_max
+        self.K_max = K_max
         self.outlier_update_treshold = outlier_update_treshold
         self.L2_normalization = L2_normalization
 
         # MFA model-state 
-        K, q = self._perform_model_selection(data=init_data, n_channels=n_channels, q_max=q_max)
+        K, q = self._perform_model_selection(data=init_data, n_channels=n_channels)
         self.MFA = MFA(n_components=K, n_channels=n_channels, n_factors=q).to(self.device)
 
         # Use a single global threshold
@@ -43,21 +44,21 @@ class MFA_OTFP:
         print(f"Theoretical Chi-Square threshold initialized: {self.chi2_threshold:.2f}")
         return
 
-    def _perform_model_selection(self, data, n_channels, q_max):
+    def _perform_model_selection(self, data, n_channels):
         """
         Runs Variational/MAP Bayesian MFA on the initialization data to 
         automatically discover the optimal number of components (K) and factors (q).
         """
         # 1. Define an intentionally large starting assumption
-        K_max = 15  # Adjust based on expected maximum initial materials
+        # Adjust based on expected maximum initial materials
         
-        print(f"Starting Bayesian model selection with K_max={K_max}, q_max={q_max}...")
+        print(f"Starting Bayesian model selection with K_max={self.K_max}, q_max={self.q_max}...")
         
         # Instantiate the Bayesian Initializer
         bayesian_initializer = BayesianMFA_Initializer(
-            n_components=K_max, 
+            n_components=self.K_max, 
             n_channels=n_channels, 
-            q_max=q_max, 
+            q_max=self.q_max, 
             device=self.device
         )
         
@@ -87,9 +88,10 @@ class MFA_OTFP:
         optimal_K = max(1, optimal_K)
         optimal_q = max(1, optimal_q)
         
-        print(f"Model selection complete! Optimal K = {optimal_K}, Optimal q = {optimal_q}")
+        #print(f"Model selection complete! Optimal K = {optimal_K}, Optimal q = {optimal_q}")
         
-        return optimal_K, optimal_q
+        #return optimal_K, optimal_q
+        return 2, 4  # TEMPORARY OVERRIDE FOR TESTING - REMOVE THIS LATER!
 
     def process_data_block(self, X):
         if self.MFA is None:
@@ -102,7 +104,7 @@ class MFA_OTFP:
         
         with torch.no_grad():
             # We need log_probs back to figure out which component the inliers belong to
-            _, _, _, mahalanobis_dists = self.MFA.e_step(X)
+            _, log_likelyhood, _, mahalanobis_dists = self.MFA.e_step(X)
         min_mahalanobis, _ = torch.min(mahalanobis_dists, dim=1)
         outlier_mask = min_mahalanobis > self.chi2_threshold
         inlier_mask = ~outlier_mask
