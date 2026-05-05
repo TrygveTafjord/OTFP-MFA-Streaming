@@ -91,7 +91,7 @@ class MFA_OTFP:
         #print(f"Model selection complete! Optimal K = {optimal_K}, Optimal q = {optimal_q}")
         
         #return optimal_K, optimal_q
-        return 2, 4  # TEMPORARY OVERRIDE FOR TESTING - REMOVE THIS LATER!
+        return 3, 4  # TEMPORARY OVERRIDE FOR TESTING - REMOVE THIS LATER!
 
     def process_data_block(self, X):
         if self.MFA is None:
