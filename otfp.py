@@ -91,7 +91,7 @@ class MFA_OTFP:
         #print(f"Model selection complete! Optimal K = {optimal_K}, Optimal q = {optimal_q}")
         
         #return optimal_K, optimal_q
-        return 3, 4  # TEMPORARY OVERRIDE FOR TESTING - REMOVE THIS LATER!
+        return 2, 4  # TEMPORARY OVERRIDE FOR TESTING - REMOVE THIS LATER!
 
     def process_data_block(self, X):
         if self.MFA is None:
@@ -103,8 +103,16 @@ class MFA_OTFP:
         self.n_samples_seen += X.shape[0]
         
         with torch.no_grad():
-            # We need log_probs back to figure out which component the inliers belong to
-            _, log_likelyhood, _, mahalanobis_dists = self.MFA.e_step(X)
+            # Unpack log_resp_norm to find the most probable component (MAP assignment)
+            log_resp_norm, _, _, mahalanobis_dists = self.MFA.e_step(X)
+        
+        # 1. MAP Assignment: argmax over the normalized log responsibilities
+        assignments = torch.argmax(log_resp_norm, dim=1)
+        
+        # 2. Distance Extraction: Use gather to pick the distance of the assigned component
+        assigned_mahalanobis = mahalanobis_dists.gather(1, assignments.unsqueeze(1)).squeeze(1)
+
+        # Original outlier masking logic using absolute geometric distances
         min_mahalanobis, _ = torch.min(mahalanobis_dists, dim=1)
         outlier_mask = min_mahalanobis > self.chi2_threshold
         inlier_mask = ~outlier_mask
@@ -112,8 +120,8 @@ class MFA_OTFP:
 
         # 1. TRACK INLIERS & CATCH LOCAL DRIFTERS
         if inlier_mask.any():
-                X_inliers = X[inlier_mask]
-                self._process_inliners(X_inliers)
+            X_inliers = X[inlier_mask]
+            self._process_inliners(X_inliers)
 
         # 2. GLOBAL OUTLIER SHELF & COMPONENT BIRTHING
         if num_new_outliers + self.num_outliers_on_shelf > self.outlier_update_treshold:
@@ -125,7 +133,6 @@ class MFA_OTFP:
             
             self.num_outliers_on_shelf = 0
 
-
         # 3. ADD TO GLOBAL OUTLIER SHELF
         elif num_new_outliers > 0:
 
@@ -134,7 +141,9 @@ class MFA_OTFP:
             
             self.global_outliers_shelf[start_idx : end_idx] = X[outlier_mask][:num_new_outliers]
             self.num_outliers_on_shelf += num_new_outliers            
-        return
+
+        # Return the MAP assignments, the geometric distances, and the statistical confidences
+        return assignments, assigned_mahalanobis, log_resp_norm
     
 
     def _process_inliners(self, X_inliers):

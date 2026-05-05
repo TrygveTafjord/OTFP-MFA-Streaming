@@ -71,7 +71,7 @@ if __name__ == "__main__":
             projection_data = projection_data.to(device, non_blocking=True)
             
             # Stream the data block into your MFA model
-            MFA_OTFP_model.process_data_block(X=projection_data)
+            _,_,_ = MFA_OTFP_model.process_data_block(X=projection_data)
             n_processed_blocks += 1
             if n_processed_blocks % 1000 == 0: 
                 print(f"==== Processed; {n_processed_blocks} blocks of data ====")
