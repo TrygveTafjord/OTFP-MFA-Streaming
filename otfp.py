@@ -1,28 +1,30 @@
 from scipy.stats import chi2
 import torch
 from mfa import MFA
-from bayesian_model_selector import BayesianMFA_Initializer
 from sklearn.cluster import DBSCAN
 
 class MFA_OTFP:
-    def __init__(self, init_data: torch.Tensor, n_channels: int, device: str, outlier_update_treshold: int, L2_normalization: bool = True, q_max: int = 8, K_max: int = 20):
+    def __init__(self, n_channels: int, device: str, outlier_update_treshold: int, L2_normalization: bool = True, q_max: int = 8):
         # System hyperparameters
         self.device = device
         self.n_channels = n_channels
         self.q_max = q_max
-        self.K_max = K_max
         self.outlier_update_treshold = outlier_update_treshold
         self.L2_normalization = L2_normalization
 
         # MFA model-state 
-        K, q = self._perform_model_selection(data=init_data, n_channels=n_channels)
-        self.MFA = MFA(n_components=K, n_channels=n_channels, n_factors=q).to(self.device)
+        self.MFA = MFA(
+            n_components=0, 
+            n_channels=n_channels, 
+            n_factors=q_max,
+            device=device
+        ).to(device)
+
+        self.MFA_fitted = False
 
         # Use a single global threshold
         self.chi2_threshold = float(chi2.ppf(0.9999, df=self.n_channels))
-        
-        self._run_mfa_setup(init_data)
-        
+                
         # Streaming statistics
         self.n_samples_seen = 0
         self.n_model_updates = 0
@@ -31,89 +33,43 @@ class MFA_OTFP:
         self.global_outliers_shelf = torch.empty((self.outlier_update_treshold, n_channels), device=self.device, dtype=torch.float32) 
         self.num_outliers_on_shelf = 0
 
-        print(f"Finished setup of OTFP-MFA: K={self.MFA.K}, q={self.MFA.q}")
-
-    def _run_mfa_setup(self, X):
+        return
+    
+    def fit(self, X):
         if self.L2_normalization:
-            X = torch.nn.functional.normalize(X, p=2, dim=1)
-
-        with torch.no_grad():
-            self.MFA.fit(X) 
-            self.MFA.init_sufficient_statistics(X)
-            
-        print(f"Theoretical Chi-Square threshold initialized: {self.chi2_threshold:.2f}")
+            X = torch.nn.functional.normalize(X, p=2, dim=1)        
+        self._birth_new_components(X)
         return
 
-    def _perform_model_selection(self, data, n_channels):
-        """
-        Runs Variational/MAP Bayesian MFA on the initialization data to 
-        automatically discover the optimal number of components (K) and factors (q).
-        """
-        # 1. Define an intentionally large starting assumption
-        # Adjust based on expected maximum initial materials
-        
-        print(f"Starting Bayesian model selection with K_max={self.K_max}, q_max={self.q_max}...")
-        
-        # Instantiate the Bayesian Initializer
-        bayesian_initializer = BayesianMFA_Initializer(
-            n_components=self.K_max, 
-            n_channels=n_channels, 
-            q_max=self.q_max, 
-            device=self.device
-        )
-        
-        # Fit the model to the initial shelf/batch of data
-        bayesian_initializer.fit_with_ard(data)
-        
-        # Extract the surviving K and q
-        with torch.no_grad():
-            # Find K: Components whose mixing weights (pi) didn't shrink to zero
-            pi_threshold = 1e-3
-            pi = torch.exp(bayesian_initializer.log_pi)
-            active_components = pi > pi_threshold
-            optimal_K = active_components.sum().item()
-            
-            # Find q: Count surviving factors (alpha < threshold) for the active components
-            alpha_threshold = 1e4
-            if optimal_K > 0:
-                # Get the active factors only for the surviving components
-                active_q_per_component = (bayesian_initializer.alpha[active_components] < alpha_threshold).sum(dim=1)
-                
-                # Taking the max ensures no component is starved of latent capacity.
-                optimal_q = active_q_per_component.max().item()
-            else:
-                optimal_q = 1
-        
-        # 5. Safety fallbacks in case of aggressive over-pruning
-        optimal_K = max(1, optimal_K)
-        optimal_q = max(1, optimal_q)
-        
-        #print(f"Model selection complete! Optimal K = {optimal_K}, Optimal q = {optimal_q}")
-        
-        #return optimal_K, optimal_q
-        return 2, 4  # TEMPORARY OVERRIDE FOR TESTING - REMOVE THIS LATER!
-
     def process_data_block(self, X):
-        if self.MFA is None:
-            raise RuntimeError("CRITICAL: MFA model was not initialized.")
 
         if self.L2_normalization:
             X = torch.nn.functional.normalize(X, p=2, dim=1)
 
         self.n_samples_seen += X.shape[0]
-        
-        with torch.no_grad():
-            # Unpack log_resp_norm to find the most probable component (MAP assignment)
-            log_resp_norm, _, _, mahalanobis_dists = self.MFA.e_step(X)
-        
-        # 1. MAP Assignment: argmax over the normalized log responsibilities
-        assignments = torch.argmax(log_resp_norm, dim=1)
-        
-        # 2. Distance Extraction: Use gather to pick the distance of the assigned component
-        assigned_mahalanobis = mahalanobis_dists.gather(1, assignments.unsqueeze(1)).squeeze(1)
 
-        # Original outlier masking logic using absolute geometric distances
-        min_mahalanobis, _ = torch.min(mahalanobis_dists, dim=1)
+        if not self.MFA_fitted:
+            min_mahalanobis = torch.full_like(torch.zeros(X.shape[0]), fill_value=(self.chi2_threshold + 1.0))  # Mark all as outliers if model isn't fitted yet
+            assignments = torch.full_like(torch.zeros(X.shape[0], dtype=torch.long), fill_value=-1)  # No valid assignments
+            log_resp_norm = None  # No responsibilities to return yet
+            assigned_mahalanobis = min_mahalanobis  # Just return the outlier distances as is for now
+            
+        else: 
+        
+            with torch.no_grad():
+                # Unpack log_resp_norm to find the most probable component (MAP assignment)
+                log_resp_norm, _, _, mahalanobis_dists = self.MFA.e_step(X)
+
+            # 1. MAP Assignment: argmax over the normalized log responsibilities
+            assignments = torch.argmax(log_resp_norm, dim=1)
+
+            # 2. Distance Extraction: Use gather to pick the distance of the assigned component
+            assigned_mahalanobis = mahalanobis_dists.gather(1, assignments.unsqueeze(1)).squeeze(1)
+
+            # Original outlier masking logic using absolute geometric distances
+            min_mahalanobis, _ = torch.min(mahalanobis_dists, dim=1)
+        
+
         outlier_mask = min_mahalanobis > self.chi2_threshold
         inlier_mask = ~outlier_mask
         num_new_outliers = outlier_mask.sum().item()
@@ -154,8 +110,7 @@ class MFA_OTFP:
     
 
     def _birth_new_components(self, X_outliers):
-            
-            dbscan = DBSCAN(eps=0.05, min_samples=2*self.n_channels, metric='cosine')
+            dbscan = DBSCAN(eps=0.001, min_samples=2*self.n_channels, metric='cosine')
             labels = dbscan.fit_predict(X_outliers.cpu().numpy())
             labels_tensor = torch.tensor(labels, device=self.device)
             
@@ -171,37 +126,53 @@ class MFA_OTFP:
             unique_clusters, cluster_counts = torch.unique(valid_labels, return_counts=True)
             
             MIN_PURE_PIXELS = 2 * self.n_channels
-            components_birthed = 0
             
-            # Loop over clusters found by DBSCAN and check if they meet the minimum size threshold to be considered a pure material cluster
+            # 1. Identify all clusters that meet the minimum size threshold
+            valid_cluster_ids = []
             for cluster_idx, size in zip(unique_clusters, cluster_counts):
                 if size.item() >= MIN_PURE_PIXELS:
-                    pure_material_mask = (labels_tensor == cluster_idx)
-                    X_pure = X_outliers[pure_material_mask]
-                    global_q = self.MFA.q
-
-                    with torch.no_grad():
-                        bayesian_spawner = BayesianMFA_Initializer(
-                            n_components=1, 
-                            n_channels=self.MFA.D, 
-                            q_max=global_q, 
-                            max_iter=30, 
-                            device=self.device
-                        )
-                        
-                        bayesian_spawner.fit_with_ard(X_pure)
-                        
-                        self.MFA.add_component(
-                            X_pure=X_pure,
-                            total_samples_seen=self.n_samples_seen,
-                            new_mu=bayesian_spawner.mu.data,
-                            new_Lambda=bayesian_spawner.Lambda.data, 
-                            new_log_psi=bayesian_spawner.log_psi.data
-                        )
-                        components_birthed += 1
+                    valid_cluster_ids.append(cluster_idx)
+                    
+            num_valid_clusters = len(valid_cluster_ids)
             
-            if components_birthed > 0:
-                print(f"\nSuccessfully birthed {components_birthed} new components this cycle.")
-            else:
+            # If no clusters are large enough, burn the shelf and return
+            if num_valid_clusters == 0:
                 print(f"Clusters found, but none met the minimum size threshold ({MIN_PURE_PIXELS} pixels). Burning shelf.")
+                return
+                
+            # 2. Gather all samples that belong to ANY valid cluster
+            valid_cluster_tensor = torch.tensor(valid_cluster_ids, device=self.device)
+            pure_materials_mask = torch.isin(labels_tensor, valid_cluster_tensor)
+            X_all_valid = X_outliers[pure_materials_mask]
+            
+            global_q = self.MFA.q
+
+            # 3. Train one MFA on all the valid cluster-samples together
+            cluster_model = MFA(
+                n_components=num_valid_clusters,
+                n_channels=self.MFA.D,
+                n_factors=global_q,
+                device=self.device
+            )
+
+            cluster_model.fit(X_all_valid, n_init=5)
+            
+            # Re-assign the points to the newly fitted MFA components
+            with torch.no_grad():
+                _, _, _, mahalanobis = cluster_model.e_step(X_all_valid)
+                new_assignments = mahalanobis.argmin(dim=1)
+                
+                # Only pass the components that actually have data assigned to them
+                self.MFA.add_components(
+                    X_valid=X_all_valid,
+                    assignments=new_assignments, # Keep this as the tensor!
+                    total_samples_seen=self.n_samples_seen,
+                    new_mu=cluster_model.mu.data,
+                    new_Lambda=cluster_model.Lambda.data,
+                    new_log_psi=cluster_model.log_psi.data
+                )
+
+                self.MFA_fitted = True
+            
             return
+    

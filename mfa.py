@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 import math
+import copy
+
 
 class MFA(nn.Module):
     def __init__(self, n_components, n_channels, n_factors, tol=1e-4, max_iter=150, device='cpu', alpha=0.6):
@@ -32,27 +34,53 @@ class MFA(nn.Module):
 
         self.register_buffer('update_counts', torch.zeros(self.K, device=self.device))
         
-    def fit(self, X):
+    def fit(self, X, n_init=5):
+        """
+        Fits the MFA model using Multiple Restarts to ensure robust convergence.
+        """
         X = X.to(self.device)
         N = X.shape[0]
+        
+        best_ll = -float('inf')
+        best_state = None
 
-        prev_ll = -float('inf')
-        with torch.no_grad():
-            for i in range(self.max_iter):
+        for init_run in range(n_init):
+            # Reset and scientifically initialize parameters
+            self._initialize_parameters(X)
+            
+            prev_ll = -float('inf')
+            
+            with torch.no_grad():
+                for i in range(self.max_iter):
+                    log_resp_norm, log_likelihood, _, _ = self.e_step(X)
+                    current_ll = log_likelihood.mean()
+                    
+                    resp = torch.exp(log_resp_norm) 
+                    self.m_step(X, resp)
+                    
+                    diff = current_ll - prev_ll
+                    if i > 0 and abs(diff) < self.tol:
+                        break
+                    prev_ll = current_ll
+                    
+                final_ll = prev_ll * N 
                 
-                log_resp_norm, log_likelihood, _ , _= self.e_step(X)
-                current_ll = log_likelihood.mean()
-                
-                resp = torch.exp(log_resp_norm) # (N, K)
-                self.m_step(X, resp)
-                
-                # Convergence check
-                diff = current_ll - prev_ll
-                if i > 0 and abs(diff) < self.tol:
-                    break
-                prev_ll = current_ll
-                
-            self.final_ll = prev_ll * N 
+                # Keep track of the best run
+                if final_ll > best_ll:
+                    best_ll = final_ll
+                    # Deep copy the state dict so it doesn't get overwritten
+                    best_state = copy.deepcopy(self.state_dict())
+                    
+        # Restore the weights of the best run
+        if best_state is not None:
+            self.load_state_dict(best_state)
+            self.final_ll = best_ll
+            # Calculating sufficient statistics from the best fit for future online updates
+            with torch.no_grad():
+                log_resp_norm, _, _, _ = self.e_step(X)
+                resp = torch.exp(log_resp_norm)
+                self.S0, self.S1, self.S_xx, self.S_z, self.S_xz, self.S_zz = self._calculate_sufficient_statistics(X, resp)
+                    
         
     def e_step(self, X):
         """
@@ -69,10 +97,10 @@ class MFA(nn.Module):
           
         - log_probs: (N, K) tensor. The conditional log-likelihood of the data 
           under each specific component j, log(P(x_i | w_j)). This is evaluated 
-          using the local covariance structure \Lambda_j\Lambda_j' + \Psi.
+          using the local covariance structure Lambda_j Lambda_j' + Psi.
           
         - mahalanobis_dists: (N, K) tensor. The squared Mahalanobis distance 
-          between each data point x_i and each cluster mean \mu_j, accounting 
+          between each data point x_i and each cluster mean mu_j, accounting 
           for the local dimensionality reduction metric.
         """
         log_probs, mahalanobis_dists = self.compute_distances_and_log_probs(X)
@@ -140,7 +168,7 @@ class MFA(nn.Module):
             diag_cross = (Lambda_tilde_new * sum_x_Eztilde).sum(dim=1) # (D,)
             
             psi_update = (diag_xx - diag_cross) / Nk[k]
-            psi_update = torch.clamp(psi_update, min=1e-5)
+            psi_update = torch.clamp(psi_update, min=1e-6)
             
             self.Lambda.data[k] = Lambda_new
             self.mu.data[k] = mu_new
@@ -152,56 +180,39 @@ class MFA(nn.Module):
         N = X.shape[0]
         resp = torch.exp(log_resp) # (N, K)
 
-        # 1. Batch Responsibilities
-        s0_batch = resp.sum(dim=0) / N                             # (K,)
-        s1_batch = (resp.T @ X) / N                                # (K, D)
-        s_xx_batch = (resp.T @ (X ** 2)) / N                       # (K, D) - Diagonal only!
+        # Get raw sums from the unified function
+        s0_sum, s1_sum, s_xx_sum, sz_sum, sxz_sum, szz_sum = self._calculate_sufficient_statistics(X, resp)
+
+        # 1. Batch Responsibilities (Scale by N for the moving average)
+        s0_batch = s0_sum / N                                      # (K,)
+        s1_batch = s1_sum / N                                      # (K, D)
+        s_xx_batch = s_xx_sum / N                                  # (K, D)
+        sz_batch = sz_sum / N                                      # (K, q)
+        sxz_batch = sxz_sum / N                                    # (K, D, q)
+        szz_batch = szz_sum / N                                    # (K, q, q)
 
         for k in range(self.K):
-            if s0_batch[k] < 1e-6:
+            if (s0_batch[k] * N) < (self.D / 2):
                 continue
-            
-            resp_k = resp[:, k].unsqueeze(1) # (N, 1)
-
-            # --- E-STEP for Latent Variables ---
-            L_k = self.Lambda[k]                      
-            mu_k = self.mu[k]                         
-            inv_psi = 1.0 / (torch.exp(self.log_psi[k]) + 1e-6) 
-
-            L_k_scaled = inv_psi.unsqueeze(1) * L_k                   
-            M = torch.eye(self.q, device=self.device) + L_k.T @ L_k_scaled
-            inv_M = torch.inverse(M)                                  
-            beta = inv_M @ L_k_scaled.T                               
-
-            diff = X - mu_k                                           
-            Ez = diff @ beta.T                                        # E[z|x] -> (N, q)
-
-            # --- Calculate Batch Sufficient Statistics ---
-            sz_batch = (resp_k * Ez).sum(dim=0) / N                   # (q,)
-            sxz_batch = ((resp_k * X).T @ Ez) / N                     # (D, q)
-
-            # E[zz^T|x] summation
-            sum_Ezz = (s0_batch[k] * N) * inv_M + Ez.T @ (resp_k * Ez)
-            szz_batch = sum_Ezz / N                                   # (q, q)
 
             # --- Interpolate Global Sufficient Statistics ---
             k_count = self.update_counts[k].item()
-            eta = (k_count + 2) ** (-self.alpha)
+            eta = (k_count + 2) ** (-self.alpha)                                # (q, q)
 
             if k_count == 0:
                 self.S0[k] = s0_batch[k]
                 self.S1[k] = s1_batch[k]
                 self.S_xx[k] = s_xx_batch[k]
-                self.S_z[k] = sz_batch
-                self.S_xz[k] = sxz_batch
-                self.S_zz[k] = szz_batch
+                self.S_z[k] = sz_batch[k]      # Added [k] here
+                self.S_xz[k] = sxz_batch[k]    # Added [k] here
+                self.S_zz[k] = szz_batch[k]    # Added [k] here
             else:
                 self.S0[k] = (1 - eta) * self.S0[k] + eta * s0_batch[k]
                 self.S1[k] = (1 - eta) * self.S1[k] + eta * s1_batch[k]
                 self.S_xx[k] = (1 - eta) * self.S_xx[k] + eta * s_xx_batch[k]
-                self.S_z[k] = (1 - eta) * self.S_z[k] + eta * sz_batch
-                self.S_xz[k] = (1 - eta) * self.S_xz[k] + eta * sxz_batch
-                self.S_zz[k] = (1 - eta) * self.S_zz[k] + eta * szz_batch
+                self.S_z[k] = (1 - eta) * self.S_z[k] + eta * sz_batch[k]      # Added [k] here
+                self.S_xz[k] = (1 - eta) * self.S_xz[k] + eta * sxz_batch[k]    # Added [k] here
+                self.S_zz[k] = (1 - eta) * self.S_zz[k] + eta * szz_batch[k]    # Added [k] here
 
             self.update_counts[k] += 1
 
@@ -228,7 +239,7 @@ class MFA(nn.Module):
             psi_update = (self.S_xx[k] - (mu_k_new * self.S1[k]) - diag_cross + ridge_penalty) / (self.S0[k] + 1e-10)
 
             # You can keep the clamp as an absolute fail-safe
-            self.log_psi.data[k] = torch.log(torch.clamp(psi_update, min=1e-5))
+            self.log_psi.data[k] = torch.log(torch.clamp(psi_update, min=1e-6))
     
     def compute_distances_and_log_probs(self, X):
         """
@@ -283,25 +294,34 @@ class MFA(nn.Module):
         
         return log_probs, mahalanobis
         
-    def add_component(self, X_pure, total_samples_seen, new_mu, new_Lambda, new_log_psi):
+    def add_components(self, X_valid, assignments, total_samples_seen, new_mu, new_Lambda, new_log_psi):
         """
-        Dynamically adds a new component to the Mixture Model.
-        Calculates and integrates its sufficient statistics internally.
+        Dynamically adds MULTIPLE new components to the Mixture Model at once.
+        Calculates sufficient statistics in a fully vectorized manner.
         """
         with torch.no_grad():
-            N_pure = X_pure.shape[0]
+            K_new = new_mu.shape[0]
             q_new = new_Lambda.shape[2]
             
-            # Calculate Scaled Sufficient Statistics Internally
-            new_S0 = torch.tensor([N_pure / max(total_samples_seen, 1)], dtype=torch.float32, device=self.device)
-            new_S1 = new_S0 * X_pure.mean(dim=0, keepdim=True)            
-            new_S_xx = new_S0 * (X_pure ** 2).mean(dim=0, keepdim=True) 
+            # Convert hard assignments (0, 1, ..., K_new-1) into a one-hot matrix (N, K_new)
+            resp = torch.nn.functional.one_hot(assignments, num_classes=K_new).float()
             
-            new_S_z = torch.zeros((1, q_new), device=self.device)
-            new_S_xz = torch.zeros((1, self.D, q_new), device=self.device)
-            new_S_zz = new_S0 * torch.eye(q_new, device=self.device).unsqueeze(0) 
+            # REFACTORED: Compute exact starting statistics using the new specific parameters
+            new_S0_sum, new_S1_sum, new_S_xx_sum, new_S_z_sum, new_S_xz_sum, new_S_zz_sum = self._calculate_sufficient_statistics(
+                X_valid, resp, mu=new_mu, Lambda=new_Lambda, log_psi=new_log_psi
+            )
+            
+            scaling_factor = max(total_samples_seen, 1)
+            
+            # Scale exactly as done previously for streaming initialization
+            new_S0 = new_S0_sum / scaling_factor
+            new_S1 = new_S1_sum / scaling_factor
+            new_S_xx = new_S_xx_sum / scaling_factor
+            new_S_z = new_S_z_sum / scaling_factor
+            new_S_xz = new_S_xz_sum / scaling_factor
+            new_S_zz = new_S_zz_sum / scaling_factor                     # (K_new, q_new, q_new)
 
-            # Handle Tensor Shape Matching (Padding Lambda and Latent Statistics)
+            # 2. Handle Tensor Shape Matching (Padding)
             if q_new < self.q:
                 pad_size = self.q - q_new
                 new_Lambda = torch.nn.functional.pad(new_Lambda, (0, pad_size))
@@ -315,15 +335,14 @@ class MFA(nn.Module):
                 self.S_z = torch.nn.functional.pad(self.S_z, (0, pad_size))
                 self.S_xz = torch.nn.functional.pad(self.S_xz, (0, pad_size))
                 self.S_zz = torch.nn.functional.pad(self.S_zz, (0, pad_size, 0, pad_size))
-                
                 self.q = q_new
 
-            # Concatenate the standard parameters safely
+            # 3. Concatenate Parameters ONCE
             self.mu = nn.Parameter(torch.cat([self.mu.data, new_mu], dim=0))
             self.Lambda = nn.Parameter(torch.cat([self.Lambda.data, new_Lambda], dim=0))
             self.log_psi = nn.Parameter(torch.cat([self.log_psi.data, new_log_psi], dim=0))
 
-            # Concatenate the Sufficient Statistics
+            # 4. Concatenate Sufficient Statistics ONCE
             self.S0 = torch.cat([self.S0, new_S0])
             self.S1 = torch.cat([self.S1, new_S1])
             self.S_xx = torch.cat([self.S_xx, new_S_xx])
@@ -331,54 +350,131 @@ class MFA(nn.Module):
             self.S_xz = torch.cat([self.S_xz, new_S_xz])
             self.S_zz = torch.cat([self.S_zz, new_S_zz])
             
-            # Initialize the update count to 1
-            self.update_counts = torch.cat([self.update_counts, torch.tensor([1.0], device=self.device)])
+            # Append 1.0 to update_counts for each new component
+            new_counts = torch.ones(K_new, device=self.device)
+            self.update_counts = torch.cat([self.update_counts, new_counts])
 
-            # Automatically update global mixing weights (log_pi)
+            # 5. Automatically update global mixing weights (log_pi)
             self.log_pi = nn.Parameter(torch.log(self.S0 / self.S0.sum() + 1e-10))
 
-            self.K += 1
-            print(f"Model successfully updated! Total components (K) is now {self.K}")
+            self.K += K_new
+            print(f"Model successfully updated! Added {K_new} components. Total (K) is now {self.K}")
 
-    def init_sufficient_statistics(self, X):
-        X = X.to(self.device)
-        with torch.no_grad():
-            log_resp_norm, _, _, _ = self.e_step(X)
-            resp = torch.exp(log_resp_norm) 
-            N = X.shape[0]
+
+    def _initialize_parameters(self, X):
+        """
+        Initializes parameters using K-Means++ and Local PCA to guarantee stable, 
+        deterministic convergence.
+        """
+        N = X.shape[0]
+        
+        # 1. K-Means++ Initialization for Means
+        centroids = [X[torch.randint(0, N, (1,), device=self.device)[0]]]
+        for _ in range(1, self.K):
+            dists = torch.cdist(X, torch.stack(centroids))
+            min_dists = dists.min(dim=1)[0]
+            probs = min_dists / min_dists.sum()
+            next_idx = torch.multinomial(probs, 1)[0]
+            centroids.append(X[next_idx])
             
-            # Divide by N so these represent normalized proportions!
-            self.S0 = resp.sum(dim=0) / N 
-            self.S1 = (resp.T @ X) / N      
-            self.S_xx = (resp.T @ (X ** 2)) / N  # Tracking the diagonal squared observations
-            
+        self.mu.data = torch.stack(centroids)
+        
+        # 2. Hard EM (K-Means) Refinement (5 iterations)
+        for _ in range(5):
+            dists = torch.cdist(X, self.mu.data)
+            labels = dists.argmin(dim=1)
             for k in range(self.K):
-                if self.S0[k] < 1e-6:
-                    continue # Skip empty/dead components
+                if (labels == k).sum() > 0:
+                    self.mu.data[k] = X[labels == k].mean(dim=0)
                     
-                resp_k = resp[:, k].unsqueeze(1) # (N, 1)
-                resp_k_sum = resp_k.sum()        # Fix for Flaw 4: Safely sum current responsibilities
-                
-                # E-STEP to recover latent expectations for initialization 
-                L_k = self.Lambda[k]                      
-                mu_k = self.mu[k]                         
-                inv_psi = 1.0 / (torch.exp(self.log_psi[k]) + 1e-6) 
-                
-                L_k_scaled = inv_psi.unsqueeze(1) * L_k                   
-                M = torch.eye(self.q, device=self.device) + L_k.T @ L_k_scaled
-                inv_M = torch.inverse(M)                                  
-                beta = inv_M @ L_k_scaled.T                               
-                
-                diff = X - mu_k                                           
-                Ez = diff @ beta.T                                        # E[z|x] -> (N, q)
-                
-                # Initialize Latent Sufficient Statistics 
-                self.S_z[k] = (resp_k * Ez).sum(dim=0) / N                   # (q,)
-                self.S_xz[k] = ((resp_k * X).T @ Ez) / N                     # (D, q)
-                
-                # E[zz^T|x] summation: FIXED
-                sum_Ezz = resp_k_sum * inv_M + Ez.T @ (resp_k * Ez)
-                self.S_zz[k] = sum_Ezz / N                                   # (q, q)
+        # 3. Local PCA for Lambda and Psi Initialization
+        dists = torch.cdist(X, self.mu.data)
+        labels = dists.argmin(dim=1)
+        
+        for k in range(self.K):
+            mask = labels == k
+            Nk = mask.sum().item()
             
-            self.update_counts = torch.ones(self.K, device=self.device)
+            if Nk > self.q + 1:
+                X_k = X[mask] - self.mu.data[k]
+                
+                # Perform SVD to find principal components
+                U, S, Vh = torch.linalg.svd(X_k, full_matrices=False)
+                
+                # Take top 'q' components
+                S_q = S[:self.q]
+                V_q = Vh[:self.q, :].T  # (D, q)
+                
+                # Scale by standard deviation
+                self.Lambda.data[k] = V_q * (S_q / math.sqrt(Nk - 1)).unsqueeze(0)
+                
+                # Estimate specific variance (Psi) from residual reconstruction error
+                X_recon = X_k @ V_q @ V_q.T
+                residual_var = ((X_k - X_recon)**2).mean(dim=0)
+                self.log_psi.data[k] = torch.log(torch.clamp(residual_var, min=1e-6))
+            else:
+                # Fallback for empty/tiny clusters
+                self.Lambda.data[k] = torch.randn(self.D, self.q, device=self.device) * 0.1
+                self.log_psi.data[k] = torch.log(torch.ones(self.D, device=self.device) * 1e-2)
+
+        # 4. Initialize Mixing Proportions
+        pi_init = torch.bincount(labels, minlength=self.K).float() / N
+        self.log_pi.data = torch.log(pi_init + 1e-6)
+
+
+    def _calculate_sufficient_statistics(self, X, resp, mu=None, Lambda=None, log_psi=None):
+        """
+        Calculates the raw unscaled sufficient statistics for the MFA model.
+        Accepts optional parameter overrides to calculate stats for newly spawned components.
+        """
+        N, D = X.shape
+        
+        # Use class parameters if overrides are not provided
+        mu = self.mu if mu is None else mu
+        Lambda = self.Lambda if Lambda is None else Lambda
+        log_psi = self.log_psi if log_psi is None else log_psi
+        
+        K = mu.shape[0]
+        q = Lambda.shape[2]
+
+        # 1. 0th, 1st, and 2nd Order Observed Statistics
+        S0 = resp.sum(dim=0)                             # (K,)
+        S1 = resp.T @ X                                  # (K, D)
+        S_xx = resp.T @ (X ** 2)                         # (K, D) - Diagonal only
+
+        # Pre-allocate latent statistics
+        S_z = torch.zeros((K, q), device=self.device)
+        S_xz = torch.zeros((K, D, q), device=self.device)
+        S_zz = torch.zeros((K, q, q), device=self.device)
+
+        # 2. Latent Statistics (requires E-step for latent variables)
+        for k in range(K):
+            if S0[k] < 1e-6:
+                # If no mass, safeguard S_zz against singular matrix inversion later
+                S_zz[k] = torch.eye(q, device=self.device) * 1e-6
+                continue
+            
+            resp_k = resp[:, k].unsqueeze(1) # (N, 1)
+
+            L_k = Lambda[k]                      
+            mu_k = mu[k]                         
+            inv_psi = 1.0 / (torch.exp(log_psi[k]) + 1e-6) 
+
+            L_k_scaled = inv_psi.unsqueeze(1) * L_k                   
+            M = torch.eye(q, device=self.device) + L_k.T @ L_k_scaled
+            inv_M = torch.inverse(M)                                  
+            beta = inv_M @ L_k_scaled.T                               
+
+            diff = X - mu_k                                           
+            Ez = diff @ beta.T                                        # E[z|x] -> (N, q)
+
+            S_z[k] = (resp_k * Ez).sum(dim=0)
+            S_xz[k] = (resp_k * X).T @ Ez
+            
+            # E[zz^T|x] summation
+            # Var(z|x) elegantly reduces to exactly inv_M, scaled by local mass S0[k]
+            sum_Ezz = S0[k] * inv_M + Ez.T @ (resp_k * Ez)            # (q, q)
+            S_zz[k] = sum_Ezz
+
+        return S0, S1, S_xx, S_z, S_xz, S_zz
     
