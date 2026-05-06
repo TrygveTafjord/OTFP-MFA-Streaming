@@ -195,3 +195,4 @@ class MFA_OTFP:
                 self.MFA_fitted = True
             
             return
+    

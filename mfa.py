@@ -79,28 +79,7 @@ class MFA(nn.Module):
             with torch.no_grad():
                 log_resp_norm, _, _, _ = self.e_step(X)
                 resp = torch.exp(log_resp_norm)
-                self.S0 = resp.sum(dim=0)
-                self.S1 = resp.T @ X
-                self.S_xx = resp.T @ (X ** 2) 
-                
-                # E-step for latent variables to compute S_z, S_xz, S_zz
-                for k in range(self.K):
-                    resp_k = resp[:, k].unsqueeze(1) 
-                    L_k = self.Lambda[k]                      
-                    mu_k = self.mu[k]                         
-                    inv_psi = 1.0 / (torch.exp(self.log_psi[k]) + 1e-6) 
-
-                    L_k_scaled = inv_psi.unsqueeze(1) * L_k                   
-                    M = torch.eye(self.q, device=self.device) + L_k.T @ L_k_scaled
-                    inv_M = torch.inverse(M)                                  
-                    beta = inv_M @ L_k_scaled.T                               
-
-                    diff = X - mu_k                                           
-                    Ez = diff @ beta.T                                        # E[z|x] -> (N, q)
-
-                    self.S_z[k] = (resp_k * Ez).sum(dim=0)
-                    self.S_xz[k] = (resp_k * X).T @ Ez
-                    self.S_zz[k] = (resp_k * Ez).T @ Ez
+                self.S0, self.S1, self.S_xx, self.S_z, self.S_xz, self.S_zz = self._calculate_sufficient_statistics(X, resp)
                     
         
     def e_step(self, X):
@@ -201,56 +180,39 @@ class MFA(nn.Module):
         N = X.shape[0]
         resp = torch.exp(log_resp) # (N, K)
 
-        # 1. Batch Responsibilities
-        s0_batch = resp.sum(dim=0) / N                             # (K,)
-        s1_batch = (resp.T @ X) / N                                # (K, D)
-        s_xx_batch = (resp.T @ (X ** 2)) / N                       # (K, D) - Diagonal only!
+        # Get raw sums from the unified function
+        s0_sum, s1_sum, s_xx_sum, sz_sum, sxz_sum, szz_sum = self._calculate_sufficient_statistics(X, resp)
+
+        # 1. Batch Responsibilities (Scale by N for the moving average)
+        s0_batch = s0_sum / N                                      # (K,)
+        s1_batch = s1_sum / N                                      # (K, D)
+        s_xx_batch = s_xx_sum / N                                  # (K, D)
+        sz_batch = sz_sum / N                                      # (K, q)
+        sxz_batch = sxz_sum / N                                    # (K, D, q)
+        szz_batch = szz_sum / N                                    # (K, q, q)
 
         for k in range(self.K):
             if s0_batch[k] < 1e-6:
                 continue
-            
-            resp_k = resp[:, k].unsqueeze(1) # (N, 1)
-
-            # --- E-STEP for Latent Variables ---
-            L_k = self.Lambda[k]                      
-            mu_k = self.mu[k]                         
-            inv_psi = 1.0 / (torch.exp(self.log_psi[k]) + 1e-6) 
-
-            L_k_scaled = inv_psi.unsqueeze(1) * L_k                   
-            M = torch.eye(self.q, device=self.device) + L_k.T @ L_k_scaled
-            inv_M = torch.inverse(M)                                  
-            beta = inv_M @ L_k_scaled.T                               
-
-            diff = X - mu_k                                           
-            Ez = diff @ beta.T                                        # E[z|x] -> (N, q)
-
-            # --- Calculate Batch Sufficient Statistics ---
-            sz_batch = (resp_k * Ez).sum(dim=0) / N                   # (q,)
-            sxz_batch = ((resp_k * X).T @ Ez) / N                     # (D, q)
-
-            # E[zz^T|x] summation
-            sum_Ezz = (s0_batch[k] * N) * inv_M + Ez.T @ (resp_k * Ez)
-            szz_batch = sum_Ezz / N                                   # (q, q)
 
             # --- Interpolate Global Sufficient Statistics ---
             k_count = self.update_counts[k].item()
-            eta = (k_count + 2) ** (-self.alpha)
+            eta = (k_count + 2) ** (-self.alpha)                                # (q, q)
 
             if k_count == 0:
                 self.S0[k] = s0_batch[k]
                 self.S1[k] = s1_batch[k]
                 self.S_xx[k] = s_xx_batch[k]
-                self.S_z[k] = sz_batch
-                self.S_xz[k] = sxz_batch
-                self.S_zz[k] = szz_batch
+                self.S_z[k] = sz_batch[k]      # Added [k] here
+                self.S_xz[k] = sxz_batch[k]    # Added [k] here
+                self.S_zz[k] = szz_batch[k]    # Added [k] here
             else:
                 self.S0[k] = (1 - eta) * self.S0[k] + eta * s0_batch[k]
                 self.S1[k] = (1 - eta) * self.S1[k] + eta * s1_batch[k]
                 self.S_xx[k] = (1 - eta) * self.S_xx[k] + eta * s_xx_batch[k]
-                self.S_z[k] = (1 - eta) * self.S_z[k] + eta * sz_batch
-                self.S_xz[k] = (1 - eta) * self.S_xz[k] + eta * sxz_batch
-                self.S_zz[k] = (1 - eta) * self.S_zz[k] + eta * szz_batch
+                self.S_z[k] = (1 - eta) * self.S_z[k] + eta * sz_batch[k]      # Added [k] here
+                self.S_xz[k] = (1 - eta) * self.S_xz[k] + eta * sxz_batch[k]    # Added [k] here
+                self.S_zz[k] = (1 - eta) * self.S_zz[k] + eta * szz_batch[k]    # Added [k] here
 
             self.update_counts[k] += 1
 
@@ -341,22 +303,23 @@ class MFA(nn.Module):
             K_new = new_mu.shape[0]
             q_new = new_Lambda.shape[2]
             
-            # 1. Vectorized Sufficient Statistics Calculation
             # Convert hard assignments (0, 1, ..., K_new-1) into a one-hot matrix (N, K_new)
             resp = torch.nn.functional.one_hot(assignments, num_classes=K_new).float()
             
+            # REFACTORED: Compute exact starting statistics using the new specific parameters
+            new_S0_sum, new_S1_sum, new_S_xx_sum, new_S_z_sum, new_S_xz_sum, new_S_zz_sum = self._calculate_sufficient_statistics(
+                X_valid, resp, mu=new_mu, Lambda=new_Lambda, log_psi=new_log_psi
+            )
+            
             scaling_factor = max(total_samples_seen, 1)
             
-            new_S0 = resp.sum(dim=0) / scaling_factor                           # (K_new,)
-            new_S1 = (resp.T @ X_valid) / scaling_factor                        # (K_new, D)
-            new_S_xx = (resp.T @ (X_valid ** 2)) / scaling_factor               # (K_new, D)
-            
-            new_S_z = torch.zeros((K_new, q_new), device=self.device)           # (K_new, q_new)
-            new_S_xz = torch.zeros((K_new, self.D, q_new), device=self.device)  # (K_new, D, q_new)
-            
-            # Create a batch of Identity matrices scaled by new_S0
-            I_q = torch.eye(q_new, device=self.device).expand(K_new, -1, -1)
-            new_S_zz = new_S0.view(K_new, 1, 1) * I_q                           # (K_new, q_new, q_new)
+            # Scale exactly as done previously for streaming initialization
+            new_S0 = new_S0_sum / scaling_factor
+            new_S1 = new_S1_sum / scaling_factor
+            new_S_xx = new_S_xx_sum / scaling_factor
+            new_S_z = new_S_z_sum / scaling_factor
+            new_S_xz = new_S_xz_sum / scaling_factor
+            new_S_zz = new_S_zz_sum / scaling_factor                     # (K_new, q_new, q_new)
 
             # 2. Handle Tensor Shape Matching (Padding)
             if q_new < self.q:
@@ -457,4 +420,61 @@ class MFA(nn.Module):
         # 4. Initialize Mixing Proportions
         pi_init = torch.bincount(labels, minlength=self.K).float() / N
         self.log_pi.data = torch.log(pi_init + 1e-6)
+
+
+    def _calculate_sufficient_statistics(self, X, resp, mu=None, Lambda=None, log_psi=None):
+        """
+        Calculates the raw unscaled sufficient statistics for the MFA model.
+        Accepts optional parameter overrides to calculate stats for newly spawned components.
+        """
+        N, D = X.shape
+        
+        # Use class parameters if overrides are not provided
+        mu = self.mu if mu is None else mu
+        Lambda = self.Lambda if Lambda is None else Lambda
+        log_psi = self.log_psi if log_psi is None else log_psi
+        
+        K = mu.shape[0]
+        q = Lambda.shape[2]
+
+        # 1. 0th, 1st, and 2nd Order Observed Statistics
+        S0 = resp.sum(dim=0)                             # (K,)
+        S1 = resp.T @ X                                  # (K, D)
+        S_xx = resp.T @ (X ** 2)                         # (K, D) - Diagonal only
+
+        # Pre-allocate latent statistics
+        S_z = torch.zeros((K, q), device=self.device)
+        S_xz = torch.zeros((K, D, q), device=self.device)
+        S_zz = torch.zeros((K, q, q), device=self.device)
+
+        # 2. Latent Statistics (requires E-step for latent variables)
+        for k in range(K):
+            if S0[k] < 1e-6:
+                # If no mass, safeguard S_zz against singular matrix inversion later
+                S_zz[k] = torch.eye(q, device=self.device) * 1e-6
+                continue
+            
+            resp_k = resp[:, k].unsqueeze(1) # (N, 1)
+
+            L_k = Lambda[k]                      
+            mu_k = mu[k]                         
+            inv_psi = 1.0 / (torch.exp(log_psi[k]) + 1e-6) 
+
+            L_k_scaled = inv_psi.unsqueeze(1) * L_k                   
+            M = torch.eye(q, device=self.device) + L_k.T @ L_k_scaled
+            inv_M = torch.inverse(M)                                  
+            beta = inv_M @ L_k_scaled.T                               
+
+            diff = X - mu_k                                           
+            Ez = diff @ beta.T                                        # E[z|x] -> (N, q)
+
+            S_z[k] = (resp_k * Ez).sum(dim=0)
+            S_xz[k] = (resp_k * X).T @ Ez
+            
+            # E[zz^T|x] summation
+            # Var(z|x) elegantly reduces to exactly inv_M, scaled by local mass S0[k]
+            sum_Ezz = S0[k] * inv_M + Ez.T @ (resp_k * Ez)            # (q, q)
+            S_zz[k] = sum_Ezz
+
+        return S0, S1, S_xx, S_z, S_xz, S_zz
     
