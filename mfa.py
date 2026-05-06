@@ -97,10 +97,10 @@ class MFA(nn.Module):
           
         - log_probs: (N, K) tensor. The conditional log-likelihood of the data 
           under each specific component j, log(P(x_i | w_j)). This is evaluated 
-          using the local covariance structure \Lambda_j\Lambda_j' + \Psi.
+          using the local covariance structure Lambda_j Lambda_j' + Psi.
           
         - mahalanobis_dists: (N, K) tensor. The squared Mahalanobis distance 
-          between each data point x_i and each cluster mean \mu_j, accounting 
+          between each data point x_i and each cluster mean mu_j, accounting 
           for the local dimensionality reduction metric.
         """
         log_probs, mahalanobis_dists = self.compute_distances_and_log_probs(X)
@@ -168,7 +168,7 @@ class MFA(nn.Module):
             diag_cross = (Lambda_tilde_new * sum_x_Eztilde).sum(dim=1) # (D,)
             
             psi_update = (diag_xx - diag_cross) / Nk[k]
-            psi_update = torch.clamp(psi_update, min=1e-5)
+            psi_update = torch.clamp(psi_update, min=1e-6)
             
             self.Lambda.data[k] = Lambda_new
             self.mu.data[k] = mu_new
@@ -192,7 +192,7 @@ class MFA(nn.Module):
         szz_batch = szz_sum / N                                    # (K, q, q)
 
         for k in range(self.K):
-            if s0_batch[k] < 1e-6:
+            if (s0_batch[k] * N) < (self.D / 2):
                 continue
 
             # --- Interpolate Global Sufficient Statistics ---
@@ -239,7 +239,7 @@ class MFA(nn.Module):
             psi_update = (self.S_xx[k] - (mu_k_new * self.S1[k]) - diag_cross + ridge_penalty) / (self.S0[k] + 1e-10)
 
             # You can keep the clamp as an absolute fail-safe
-            self.log_psi.data[k] = torch.log(torch.clamp(psi_update, min=1e-5))
+            self.log_psi.data[k] = torch.log(torch.clamp(psi_update, min=1e-6))
     
     def compute_distances_and_log_probs(self, X):
         """
@@ -411,7 +411,7 @@ class MFA(nn.Module):
                 # Estimate specific variance (Psi) from residual reconstruction error
                 X_recon = X_k @ V_q @ V_q.T
                 residual_var = ((X_k - X_recon)**2).mean(dim=0)
-                self.log_psi.data[k] = torch.log(torch.clamp(residual_var, min=1e-4))
+                self.log_psi.data[k] = torch.log(torch.clamp(residual_var, min=1e-6))
             else:
                 # Fallback for empty/tiny clusters
                 self.Lambda.data[k] = torch.randn(self.D, self.q, device=self.device) * 0.1
