@@ -41,7 +41,7 @@ class MFA_OTFP:
         self._birth_new_components(X)
         return
 
-    def process_data_block(self, X):
+    def process_data_block(self, X, stepwise_updates: bool = True):
 
         if self.L2_normalization:
             X = torch.nn.functional.normalize(X, p=2, dim=1)
@@ -75,7 +75,7 @@ class MFA_OTFP:
         num_new_outliers = outlier_mask.sum().item()
 
         # 1. TRACK INLIERS & CATCH LOCAL DRIFTERS
-        if inlier_mask.any():
+        if inlier_mask.any() and stepwise_updates:
             X_inliers = X[inlier_mask]
             self._process_inliners(X_inliers)
 
