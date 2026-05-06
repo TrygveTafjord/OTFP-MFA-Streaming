@@ -36,13 +36,9 @@ class MFA_OTFP:
         return
     
     def fit(self, X):
-
-
         if self.L2_normalization:
-            X = torch.nn.functional.normalize(X, p=2, dim=1)
-        self.MFA.fit(X, n_init=5)
-        self.n_samples_seen += X.shape[0]
-        self.MFA_fitted = True
+            X = torch.nn.functional.normalize(X, p=2, dim=1)        
+        self._birth_new_components(X)
         return
 
     def process_data_block(self, X):
@@ -114,7 +110,7 @@ class MFA_OTFP:
     
 
     def _birth_new_components(self, X_outliers):
-            dbscan = DBSCAN(eps=0.05, min_samples=2*self.n_channels, metric='cosine')
+            dbscan = DBSCAN(eps=0.001, min_samples=2*self.n_channels, metric='cosine')
             labels = dbscan.fit_predict(X_outliers.cpu().numpy())
             labels_tensor = torch.tensor(labels, device=self.device)
             
