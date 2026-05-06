@@ -128,3 +128,19 @@ def mean_center_data(data):
     
     return centered_data, mean
 
+
+
+def get_rgb(hsi_cube):
+    """Extracts RGB, normalizes globally to preserve color balance, and applies gamma correction."""
+    r, g, b = hsi_cube[:, :, 70], hsi_cube[:, :, 50], hsi_cube[:, :, 20]
+    rgb = np.stack([r, g, b], axis=-1)
+    
+    p_low = np.nanpercentile(rgb, 2)
+    p_high = np.nanpercentile(rgb, 98)
+    rgb_norm = (rgb - p_low) / (p_high - p_low + 1e-8)
+    rgb_clipped = np.clip(rgb_norm, 0, 1)
+    
+    gamma = 0.8
+    rgb_gamma = rgb_clipped ** gamma
+    
+    return rgb_gamma
