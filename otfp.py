@@ -151,7 +151,7 @@ class MFA_OTFP:
             
             global_q = self.MFA.q
 
-            # 3. Train ONE MFA on all the valid cluster-samples together
+            # 3. Train one MFA on all the valid cluster-samples together
             cluster_model = MFA(
                 n_components=num_valid_clusters,
                 n_channels=self.MFA.D,
@@ -166,30 +166,14 @@ class MFA_OTFP:
                 _, _, _, mahalanobis = cluster_model.e_step(X_all_valid)
                 new_assignments = mahalanobis.argmin(dim=1)
                 
-            # Filter out any components that might have "died" (empty assignments)
-            unique_assignments, _ = torch.unique(new_assignments, return_counts=True)
-            num_survivors = len(unique_assignments)
-            
-            if num_survivors < num_valid_clusters:
-                print(f"Warning: {num_valid_clusters - num_survivors} clusters died during MFA fitting. Only {num_survivors} will be birthed.")
-                
-                # Remap assignments to be contiguous (0 to num_survivors - 1)
-                remapped_assignments = torch.zeros_like(new_assignments)
-                for i, old_idx in enumerate(unique_assignments):
-                    remapped_assignments[new_assignments == old_idx] = i
-                
-                # Overwrite new_assignments with the safe, contiguous labels
-                new_assignments = remapped_assignments
-            
-            if num_survivors > 0:
                 # Only pass the components that actually have data assigned to them
                 self.MFA.add_components(
                     X_valid=X_all_valid,
                     assignments=new_assignments, # Keep this as the tensor!
                     total_samples_seen=self.n_samples_seen,
-                    new_mu=cluster_model.mu[unique_assignments].data,
-                    new_Lambda=cluster_model.Lambda[unique_assignments].data,
-                    new_log_psi=cluster_model.log_psi[unique_assignments].data
+                    new_mu=cluster_model.mu.data,
+                    new_Lambda=cluster_model.Lambda.data,
+                    new_log_psi=cluster_model.log_psi.data
                 )
 
                 self.MFA_fitted = True
