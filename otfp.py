@@ -1,7 +1,6 @@
 from scipy.stats import chi2
 import torch
 from mfa import MFA
-from bayesian_model_selector import BayesianMFA_Initializer
 from sklearn.cluster import DBSCAN
 
 class MFA_OTFP:
@@ -15,11 +14,13 @@ class MFA_OTFP:
 
         # MFA model-state 
         self.MFA = MFA(
-            n_components=1, 
+            n_components=0, 
             n_channels=n_channels, 
             n_factors=q_max,
             device=device
         ).to(device)
+
+        self.MFA_fitted = False
 
         # Use a single global threshold
         self.chi2_threshold = float(chi2.ppf(0.9999, df=self.n_channels))
@@ -33,7 +34,16 @@ class MFA_OTFP:
         self.num_outliers_on_shelf = 0
 
         return
+    
+    def fit(self, X):
 
+
+        if self.L2_normalization:
+            X = torch.nn.functional.normalize(X, p=2, dim=1)
+        self.MFA.fit(X, n_init=5)
+        self.n_samples_seen += X.shape[0]
+        self.MFA_fitted = True
+        return
 
     def process_data_block(self, X):
 
@@ -41,19 +51,29 @@ class MFA_OTFP:
             X = torch.nn.functional.normalize(X, p=2, dim=1)
 
         self.n_samples_seen += X.shape[0]
-        
-        with torch.no_grad():
-            # Unpack log_resp_norm to find the most probable component (MAP assignment)
-            log_resp_norm, _, _, mahalanobis_dists = self.MFA.e_step(X)
-        
-        # 1. MAP Assignment: argmax over the normalized log responsibilities
-        assignments = torch.argmax(log_resp_norm, dim=1)
-        
-        # 2. Distance Extraction: Use gather to pick the distance of the assigned component
-        assigned_mahalanobis = mahalanobis_dists.gather(1, assignments.unsqueeze(1)).squeeze(1)
 
-        # Original outlier masking logic using absolute geometric distances
-        min_mahalanobis, _ = torch.min(mahalanobis_dists, dim=1)
+        if not self.MFA_fitted:
+            min_mahalanobis = torch.full_like(torch.zeros(X.shape[0]), fill_value=(self.chi2_threshold + 1.0))  # Mark all as outliers if model isn't fitted yet
+            assignments = torch.full_like(torch.zeros(X.shape[0], dtype=torch.long), fill_value=-1)  # No valid assignments
+            log_resp_norm = None  # No responsibilities to return yet
+            assigned_mahalanobis = min_mahalanobis  # Just return the outlier distances as is for now
+            
+        else: 
+        
+            with torch.no_grad():
+                # Unpack log_resp_norm to find the most probable component (MAP assignment)
+                log_resp_norm, _, _, mahalanobis_dists = self.MFA.e_step(X)
+
+            # 1. MAP Assignment: argmax over the normalized log responsibilities
+            assignments = torch.argmax(log_resp_norm, dim=1)
+
+            # 2. Distance Extraction: Use gather to pick the distance of the assigned component
+            assigned_mahalanobis = mahalanobis_dists.gather(1, assignments.unsqueeze(1)).squeeze(1)
+
+            # Original outlier masking logic using absolute geometric distances
+            min_mahalanobis, _ = torch.min(mahalanobis_dists, dim=1)
+        
+
         outlier_mask = min_mahalanobis > self.chi2_threshold
         inlier_mask = ~outlier_mask
         num_new_outliers = outlier_mask.sum().item()
@@ -94,7 +114,6 @@ class MFA_OTFP:
     
 
     def _birth_new_components(self, X_outliers):
-            
             dbscan = DBSCAN(eps=0.05, min_samples=2*self.n_channels, metric='cosine')
             labels = dbscan.fit_predict(X_outliers.cpu().numpy())
             labels_tensor = torch.tensor(labels, device=self.device)
@@ -111,35 +130,68 @@ class MFA_OTFP:
             unique_clusters, cluster_counts = torch.unique(valid_labels, return_counts=True)
             
             MIN_PURE_PIXELS = 2 * self.n_channels
-            components_birthed = 0
             
-            # Loop over clusters found by DBSCAN and check if they meet the minimum size threshold to be considered a pure material cluster
+            # 1. Identify all clusters that meet the minimum size threshold
+            valid_cluster_ids = []
             for cluster_idx, size in zip(unique_clusters, cluster_counts):
                 if size.item() >= MIN_PURE_PIXELS:
-                    pure_material_mask = (labels_tensor == cluster_idx)
-                    X_pure = X_outliers[pure_material_mask]
-                    global_q = self.MFA.q
-
-                    cluster_model = MFA(
-                        n_components=1,
-                        n_channels=self.MFA.D,
-                        n_factors=global_q,
-                        device=self.device
-                    )
-
-                    cluster_model.fit(X_pure, n_init=5)
-                        
-                    self.MFA.add_component(
-                        X_pure=X_pure,
-                        total_samples_seen=self.n_samples_seen,
-                        new_mu=cluster_model.mu.data,
-                        new_Lambda=cluster_model.Lambda.data, 
-                        new_log_psi=cluster_model.log_psi.data
-                    )
-                    components_birthed += 1
+                    valid_cluster_ids.append(cluster_idx)
+                    
+            num_valid_clusters = len(valid_cluster_ids)
             
-            if components_birthed > 0:
-                print(f"\nSuccessfully birthed {components_birthed} new components this cycle.")
-            else:
+            # If no clusters are large enough, burn the shelf and return
+            if num_valid_clusters == 0:
                 print(f"Clusters found, but none met the minimum size threshold ({MIN_PURE_PIXELS} pixels). Burning shelf.")
+                return
+                
+            # 2. Gather all samples that belong to ANY valid cluster
+            valid_cluster_tensor = torch.tensor(valid_cluster_ids, device=self.device)
+            pure_materials_mask = torch.isin(labels_tensor, valid_cluster_tensor)
+            X_all_valid = X_outliers[pure_materials_mask]
+            
+            global_q = self.MFA.q
+
+            # 3. Train ONE MFA on all the valid cluster-samples together
+            cluster_model = MFA(
+                n_components=num_valid_clusters,
+                n_channels=self.MFA.D,
+                n_factors=global_q,
+                device=self.device
+            )
+
+            cluster_model.fit(X_all_valid, n_init=5)
+            
+            # Re-assign the points to the newly fitted MFA components
+            with torch.no_grad():
+                _, _, _, mahalanobis = cluster_model.e_step(X_all_valid)
+                new_assignments = mahalanobis.argmin(dim=1)
+                
+            # Filter out any components that might have "died" (empty assignments)
+            unique_assignments, _ = torch.unique(new_assignments, return_counts=True)
+            num_survivors = len(unique_assignments)
+            
+            if num_survivors < num_valid_clusters:
+                print(f"Warning: {num_valid_clusters - num_survivors} clusters died during MFA fitting. Only {num_survivors} will be birthed.")
+                
+                # Remap assignments to be contiguous (0 to num_survivors - 1)
+                remapped_assignments = torch.zeros_like(new_assignments)
+                for i, old_idx in enumerate(unique_assignments):
+                    remapped_assignments[new_assignments == old_idx] = i
+                
+                # Overwrite new_assignments with the safe, contiguous labels
+                new_assignments = remapped_assignments
+            
+            if num_survivors > 0:
+                # Only pass the components that actually have data assigned to them
+                self.MFA.add_components(
+                    X_valid=X_all_valid,
+                    assignments=new_assignments, # Keep this as the tensor!
+                    total_samples_seen=self.n_samples_seen,
+                    new_mu=cluster_model.mu[unique_assignments].data,
+                    new_Lambda=cluster_model.Lambda[unique_assignments].data,
+                    new_log_psi=cluster_model.log_psi[unique_assignments].data
+                )
+
+                self.MFA_fitted = True
+            
             return

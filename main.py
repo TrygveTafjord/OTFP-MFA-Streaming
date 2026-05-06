@@ -51,7 +51,7 @@ if __name__ == "__main__":
         daemon=True
     )
     producer_thread.start()
-
+    TOTAL_NUMBER_OF_PIXELS = 1
     try:
         # Main processing loop
         n_processed_blocks = 0
