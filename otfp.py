@@ -5,24 +5,25 @@ from bayesian_model_selector import BayesianMFA_Initializer
 from sklearn.cluster import DBSCAN
 
 class MFA_OTFP:
-    def __init__(self, init_data: torch.Tensor, n_channels: int, device: str, outlier_update_treshold: int, L2_normalization: bool = True, q_max: int = 8, K_max: int = 20):
+    def __init__(self, n_channels: int, device: str, outlier_update_treshold: int, L2_normalization: bool = True, q_max: int = 8):
         # System hyperparameters
         self.device = device
         self.n_channels = n_channels
         self.q_max = q_max
-        self.K_max = K_max
         self.outlier_update_treshold = outlier_update_treshold
         self.L2_normalization = L2_normalization
 
         # MFA model-state 
-        K, q = self._perform_model_selection(data=init_data, n_channels=n_channels)
-        self.MFA = MFA(n_components=K, n_channels=n_channels, n_factors=q).to(self.device)
+        self.MFA = MFA(
+            n_components=1, 
+            n_channels=n_channels, 
+            n_factors=q_max,
+            device=device
+        ).to(device)
 
         # Use a single global threshold
         self.chi2_threshold = float(chi2.ppf(0.9999, df=self.n_channels))
-        
-        self._run_mfa_setup(init_data)
-        
+                
         # Streaming statistics
         self.n_samples_seen = 0
         self.n_model_updates = 0
@@ -31,71 +32,10 @@ class MFA_OTFP:
         self.global_outliers_shelf = torch.empty((self.outlier_update_treshold, n_channels), device=self.device, dtype=torch.float32) 
         self.num_outliers_on_shelf = 0
 
-        print(f"Finished setup of OTFP-MFA: K={self.MFA.K}, q={self.MFA.q}")
-
-    def _run_mfa_setup(self, X):
-        if self.L2_normalization:
-            X = torch.nn.functional.normalize(X, p=2, dim=1)
-
-        with torch.no_grad():
-            self.MFA.fit(X) 
-            self.MFA.init_sufficient_statistics(X)
-            
-        print(f"Theoretical Chi-Square threshold initialized: {self.chi2_threshold:.2f}")
         return
 
-    def _perform_model_selection(self, data, n_channels):
-        """
-        Runs Variational/MAP Bayesian MFA on the initialization data to 
-        automatically discover the optimal number of components (K) and factors (q).
-        """
-        # 1. Define an intentionally large starting assumption
-        # Adjust based on expected maximum initial materials
-        
-        print(f"Starting Bayesian model selection with K_max={self.K_max}, q_max={self.q_max}...")
-        
-        # Instantiate the Bayesian Initializer
-        bayesian_initializer = BayesianMFA_Initializer(
-            n_components=self.K_max, 
-            n_channels=n_channels, 
-            q_max=self.q_max, 
-            device=self.device
-        )
-        
-        # Fit the model to the initial shelf/batch of data
-        bayesian_initializer.fit_with_ard(data)
-        
-        # Extract the surviving K and q
-        with torch.no_grad():
-            # Find K: Components whose mixing weights (pi) didn't shrink to zero
-            pi_threshold = 1e-3
-            pi = torch.exp(bayesian_initializer.log_pi)
-            active_components = pi > pi_threshold
-            optimal_K = active_components.sum().item()
-            
-            # Find q: Count surviving factors (alpha < threshold) for the active components
-            alpha_threshold = 1e4
-            if optimal_K > 0:
-                # Get the active factors only for the surviving components
-                active_q_per_component = (bayesian_initializer.alpha[active_components] < alpha_threshold).sum(dim=1)
-                
-                # Taking the max ensures no component is starved of latent capacity.
-                optimal_q = active_q_per_component.max().item()
-            else:
-                optimal_q = 1
-        
-        # 5. Safety fallbacks in case of aggressive over-pruning
-        optimal_K = max(1, optimal_K)
-        optimal_q = max(1, optimal_q)
-        
-        #print(f"Model selection complete! Optimal K = {optimal_K}, Optimal q = {optimal_q}")
-        
-        #return optimal_K, optimal_q
-        return 2, 4  # TEMPORARY OVERRIDE FOR TESTING - REMOVE THIS LATER!
 
     def process_data_block(self, X):
-        if self.MFA is None:
-            raise RuntimeError("CRITICAL: MFA model was not initialized.")
 
         if self.L2_normalization:
             X = torch.nn.functional.normalize(X, p=2, dim=1)
@@ -180,25 +120,23 @@ class MFA_OTFP:
                     X_pure = X_outliers[pure_material_mask]
                     global_q = self.MFA.q
 
-                    with torch.no_grad():
-                        bayesian_spawner = BayesianMFA_Initializer(
-                            n_components=1, 
-                            n_channels=self.MFA.D, 
-                            q_max=global_q, 
-                            max_iter=30, 
-                            device=self.device
-                        )
+                    cluster_model = MFA(
+                        n_components=1,
+                        n_channels=self.MFA.D,
+                        n_factors=global_q,
+                        device=self.device
+                    )
+
+                    cluster_model.fit(X_pure, n_init=5)
                         
-                        bayesian_spawner.fit_with_ard(X_pure)
-                        
-                        self.MFA.add_component(
-                            X_pure=X_pure,
-                            total_samples_seen=self.n_samples_seen,
-                            new_mu=bayesian_spawner.mu.data,
-                            new_Lambda=bayesian_spawner.Lambda.data, 
-                            new_log_psi=bayesian_spawner.log_psi.data
-                        )
-                        components_birthed += 1
+                    self.MFA.add_component(
+                        X_pure=X_pure,
+                        total_samples_seen=self.n_samples_seen,
+                        new_mu=cluster_model.mu.data,
+                        new_Lambda=cluster_model.Lambda.data, 
+                        new_log_psi=cluster_model.log_psi.data
+                    )
+                    components_birthed += 1
             
             if components_birthed > 0:
                 print(f"\nSuccessfully birthed {components_birthed} new components this cycle.")

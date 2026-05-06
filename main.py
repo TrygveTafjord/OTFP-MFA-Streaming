@@ -3,7 +3,7 @@ import time
 import torch
 import os
 from multiprocessing import Queue, Process
-from data_fetcher import producer, fetch_init_data, DataProduct
+from data_fetcher import producer, DataProduct
 from otfp import MFA_OTFP
 
 PERFORM_TIMING = True
@@ -26,19 +26,15 @@ if __name__ == "__main__":
     if PERFORM_TIMING:
         start_time = time.perf_counter()
 
-    initial_batch = fetch_init_data(IMAGE_PATHS, N_SAMPLES_FIRST_MODEL, DATA_PRODUCT)
 
     # Initialize the MFA-based OTFP model
     MFA_OTFP_model = MFA_OTFP(
-        init_data=initial_batch,
         n_channels=NUM_CHANNELS, 
         device=device, 
         outlier_update_treshold=OUTLIER_UPDATE_TRESHOLD,
         q_max=Q_MAX,
         L2_normalization=True
     )
-
-    del initial_batch
     
     seed = 42
     torch.manual_seed(seed)

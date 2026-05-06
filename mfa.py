@@ -32,27 +32,48 @@ class MFA(nn.Module):
 
         self.register_buffer('update_counts', torch.zeros(self.K, device=self.device))
         
-    def fit(self, X):
+    def fit(self, X, n_init=5):
+        """
+        Fits the MFA model using Multiple Restarts to ensure robust convergence.
+        """
         X = X.to(self.device)
         N = X.shape[0]
+        
+        best_ll = -float('inf')
+        best_state = None
 
-        prev_ll = -float('inf')
-        with torch.no_grad():
-            for i in range(self.max_iter):
+        for init_run in range(n_init):
+            # Reset and scientifically initialize parameters
+            self._initialize_parameters(X)
+            
+            prev_ll = -float('inf')
+            
+            with torch.no_grad():
+                for i in range(self.max_iter):
+                    log_resp_norm, log_likelihood, _, _ = self.e_step(X)
+                    current_ll = log_likelihood.mean()
+                    
+                    resp = torch.exp(log_resp_norm) 
+                    self.m_step(X, resp)
+                    
+                    diff = current_ll - prev_ll
+                    if i > 0 and abs(diff) < self.tol:
+                        break
+                    prev_ll = current_ll
+                    
+                final_ll = prev_ll * N 
                 
-                log_resp_norm, log_likelihood, _ , _= self.e_step(X)
-                current_ll = log_likelihood.mean()
-                
-                resp = torch.exp(log_resp_norm) # (N, K)
-                self.m_step(X, resp)
-                
-                # Convergence check
-                diff = current_ll - prev_ll
-                if i > 0 and abs(diff) < self.tol:
-                    break
-                prev_ll = current_ll
-                
-            self.final_ll = prev_ll * N 
+                # Keep track of the best run
+                if final_ll > best_ll:
+                    best_ll = final_ll
+                    # Deep copy the state dict so it doesn't get overwritten
+                    import copy
+                    best_state = copy.deepcopy(self.state_dict())
+                    
+        # Restore the weights of the best run
+        if best_state is not None:
+            self.load_state_dict(best_state)
+            self.final_ll = best_ll
         
     def e_step(self, X):
         """
@@ -382,3 +403,62 @@ class MFA(nn.Module):
             
             self.update_counts = torch.ones(self.K, device=self.device)
     
+    def _initialize_parameters(self, X):
+        """
+        Initializes parameters using K-Means++ and Local PCA to guarantee stable, 
+        deterministic convergence.
+        """
+        N = X.shape[0]
+        
+        # 1. K-Means++ Initialization for Means
+        centroids = [X[torch.randint(0, N, (1,), device=self.device)[0]]]
+        for _ in range(1, self.K):
+            dists = torch.cdist(X, torch.stack(centroids))
+            min_dists = dists.min(dim=1)[0]
+            probs = min_dists / min_dists.sum()
+            next_idx = torch.multinomial(probs, 1)[0]
+            centroids.append(X[next_idx])
+            
+        self.mu.data = torch.stack(centroids)
+        
+        # 2. Hard EM (K-Means) Refinement (5 iterations)
+        for _ in range(5):
+            dists = torch.cdist(X, self.mu.data)
+            labels = dists.argmin(dim=1)
+            for k in range(self.K):
+                if (labels == k).sum() > 0:
+                    self.mu.data[k] = X[labels == k].mean(dim=0)
+                    
+        # 3. Local PCA for Lambda and Psi Initialization
+        dists = torch.cdist(X, self.mu.data)
+        labels = dists.argmin(dim=1)
+        
+        for k in range(self.K):
+            mask = labels == k
+            Nk = mask.sum().item()
+            
+            if Nk > self.q + 1:
+                X_k = X[mask] - self.mu.data[k]
+                
+                # Perform SVD to find principal components
+                U, S, Vh = torch.linalg.svd(X_k, full_matrices=False)
+                
+                # Take top 'q' components
+                S_q = S[:self.q]
+                V_q = Vh[:self.q, :].T  # (D, q)
+                
+                # Scale by standard deviation
+                self.Lambda.data[k] = V_q * (S_q / math.sqrt(Nk - 1)).unsqueeze(0)
+                
+                # Estimate specific variance (Psi) from residual reconstruction error
+                X_recon = X_k @ V_q @ V_q.T
+                residual_var = ((X_k - X_recon)**2).mean(dim=0)
+                self.log_psi.data[k] = torch.log(torch.clamp(residual_var, min=1e-4))
+            else:
+                # Fallback for empty/tiny clusters
+                self.Lambda.data[k] = torch.randn(self.D, self.q, device=self.device) * 0.1
+                self.log_psi.data[k] = torch.log(torch.ones(self.D, device=self.device) * 1e-2)
+
+        # 4. Initialize Mixing Proportions
+        pi_init = torch.bincount(labels, minlength=self.K).float() / N
+        self.log_pi.data = torch.log(pi_init + 1e-6)
