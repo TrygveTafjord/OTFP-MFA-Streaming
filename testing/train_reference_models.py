@@ -1,9 +1,10 @@
 import torch
 import glob
-from mfa import MFA
+from ..mfa import MFA
 from utils import get_data, DataProduct
 import time
 import os
+
 
 data_product = DataProduct.L1B
 K = 7  # Number of MFA compobnents to use 
