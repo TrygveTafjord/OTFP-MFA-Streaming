@@ -118,7 +118,7 @@ class MFA_OTFP:
             valid_mask = labels_tensor >= 0
             
             if not valid_mask.any():
-                print("Shelf full, but only contained scattered noise. Burning shelf.")
+                #print("Shelf full, but only contained scattered noise. Burning shelf.")
                 return
             
             # Find all unique clusters and their sizes
@@ -137,7 +137,7 @@ class MFA_OTFP:
             
             # If no clusters are large enough, burn the shelf and return
             if num_valid_clusters == 0:
-                print(f"Clusters found, but none met the minimum size threshold ({MIN_PURE_PIXELS} pixels). Burning shelf.")
+                #print(f"Clusters found, but none met the minimum size threshold ({MIN_PURE_PIXELS} pixels). Burning shelf.")
                 return
                 
             # 2. Gather all samples that belong to ANY valid cluster
