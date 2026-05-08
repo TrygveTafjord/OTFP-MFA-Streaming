@@ -45,7 +45,7 @@ class MFA(nn.Module):
         best_state = None
 
         for init_run in range(n_init):
-            # Reset and scientifically initialize parameters
+            # Initialize parameters
             self._initialize_parameters(X)
             
             prev_ll = -float('inf')
@@ -296,7 +296,7 @@ class MFA(nn.Module):
         
     def add_components(self, X_valid, assignments, total_samples_seen, new_mu, new_Lambda, new_log_psi):
         """
-        Dynamically adds MULTIPLE new components to the Mixture Model at once.
+        Dynamically adds multiple new components to the Mixture Model at once.
         Calculates sufficient statistics in a fully vectorized manner.
         """
         with torch.no_grad():
@@ -306,7 +306,7 @@ class MFA(nn.Module):
             # Convert hard assignments (0, 1, ..., K_new-1) into a one-hot matrix (N, K_new)
             resp = torch.nn.functional.one_hot(assignments, num_classes=K_new).float()
             
-            # REFACTORED: Compute exact starting statistics using the new specific parameters
+            # Compute exact starting statistics using the new specific parameters
             new_S0_sum, new_S1_sum, new_S_xx_sum, new_S_z_sum, new_S_xz_sum, new_S_zz_sum = self._calculate_sufficient_statistics(
                 X_valid, resp, mu=new_mu, Lambda=new_Lambda, log_psi=new_log_psi
             )
@@ -337,12 +337,12 @@ class MFA(nn.Module):
                 self.S_zz = torch.nn.functional.pad(self.S_zz, (0, pad_size, 0, pad_size))
                 self.q = q_new
 
-            # 3. Concatenate Parameters ONCE
+            # 3. Concatenate Parameters
             self.mu = nn.Parameter(torch.cat([self.mu.data, new_mu], dim=0))
             self.Lambda = nn.Parameter(torch.cat([self.Lambda.data, new_Lambda], dim=0))
             self.log_psi = nn.Parameter(torch.cat([self.log_psi.data, new_log_psi], dim=0))
 
-            # 4. Concatenate Sufficient Statistics ONCE
+            # 4. Concatenate Sufficient Statistics 
             self.S0 = torch.cat([self.S0, new_S0])
             self.S1 = torch.cat([self.S1, new_S1])
             self.S_xx = torch.cat([self.S_xx, new_S_xx])

@@ -60,15 +60,9 @@ class MFA_OTFP:
                 # Unpack log_resp_norm to find the most probable component (MAP assignment)
                 log_resp_norm, _, _, mahalanobis_dists = self.MFA.e_step(X)
 
-            # 1. MAP Assignment: argmax over the normalized log responsibilities
             assignments = torch.argmax(log_resp_norm, dim=1)
-
-            # 2. Distance Extraction: Use gather to pick the distance of the assigned component
             assigned_mahalanobis = mahalanobis_dists.gather(1, assignments.unsqueeze(1)).squeeze(1)
-
-            # Original outlier masking logic using absolute geometric distances
             min_mahalanobis, _ = torch.min(mahalanobis_dists, dim=1)
-        
 
         outlier_mask = min_mahalanobis > self.chi2_threshold
         inlier_mask = ~outlier_mask
@@ -110,7 +104,12 @@ class MFA_OTFP:
     
 
     def _birth_new_components(self, X_outliers):
-            dbscan = DBSCAN(eps=0.001, min_samples=2*self.n_channels, metric='cosine')
+            if self.L2_normalization:
+                metric = 'cosine'
+            else:
+                metric = 'euclidean'
+
+            dbscan = DBSCAN(eps=0.001, min_samples=2*self.n_channels, metric=metric)
             labels = dbscan.fit_predict(X_outliers.cpu().numpy())
             labels_tensor = torch.tensor(labels, device=self.device)
             
@@ -147,7 +146,7 @@ class MFA_OTFP:
             
             global_q = self.MFA.q
 
-            # 3. Train one MFA on all the valid cluster-samples together
+            # 3. Train an MFA on all the valid cluster-samples together
             cluster_model = MFA(
                 n_components=num_valid_clusters,
                 n_channels=self.MFA.D,
@@ -165,7 +164,7 @@ class MFA_OTFP:
                 # Only pass the components that actually have data assigned to them
                 self.MFA.add_components(
                     X_valid=X_all_valid,
-                    assignments=new_assignments, # Keep this as the tensor!
+                    assignments=new_assignments, 
                     total_samples_seen=self.n_samples_seen,
                     new_mu=cluster_model.mu.data,
                     new_Lambda=cluster_model.Lambda.data,
