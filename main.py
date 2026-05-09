@@ -4,7 +4,7 @@ import torch
 import os
 from multiprocessing import Queue, Process
 from data_fetcher import producer, DataProduct
-from otfp import MFA_OTFP
+from otfp_HDBSCAN import MFA_OTFP
 
 PERFORM_TIMING = True
 
