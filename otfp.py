@@ -79,7 +79,6 @@ class MFA_OTFP:
             
             X_outliers = self.global_outliers_shelf[:self.num_outliers_on_shelf]
             X_outliers = torch.cat([X_outliers, X[outlier_mask]], dim=0)
-
             self._birth_new_components(X_outliers)
             
             self.num_outliers_on_shelf = 0
@@ -112,7 +111,7 @@ class MFA_OTFP:
                 metric = 'euclidean'
                 dbscan_eps = 50.0
 
-            dbscan = DBSCAN(eps=dbscan_eps, min_samples=2*self.n_channels, metric=metric)
+            dbscan = DBSCAN(eps=dbscan_eps, min_samples=self.n_channels, metric=metric)
             labels = dbscan.fit_predict(X_outliers.cpu().numpy())
             labels_tensor = torch.tensor(labels, device=self.device)
             
@@ -120,39 +119,18 @@ class MFA_OTFP:
             valid_mask = labels_tensor >= 0
             
             if not valid_mask.any():
-                #print("Shelf full, but only contained scattered noise. Burning shelf.")
+                # print("Shelf full, but only contained scattered noise. Burning shelf.")
                 return
             
             # Find all unique clusters and their sizes
             valid_labels = labels_tensor[valid_mask]
             unique_clusters, cluster_counts = torch.unique(valid_labels, return_counts=True)
-
-            print(f"DBSCAN identified {len(unique_clusters)} cluster(s) on the shelf, with sizes: {[size.item() for size in cluster_counts]}.")
             
-            MIN_PURE_PIXELS = self.n_channels
-            
-            # 1. Identify all clusters that meet the minimum size threshold
-            valid_cluster_ids = []
-            num_burned_clusters = 0
-            for cluster_idx, size in zip(unique_clusters, cluster_counts):
-                if size.item() >= MIN_PURE_PIXELS:
-                    valid_cluster_ids.append(cluster_idx)
-                else: 
-                    num_burned_clusters += 1
+            num_valid_clusters = len(unique_clusters)
 
-            num_valid_clusters = len(valid_cluster_ids)
-
-            if num_burned_clusters > 0:
-                print(f"Identified {num_burned_clusters} cluster(s) on the shelf that were too small, with sizes: {[size.item() for size in cluster_counts if size.item() >= MIN_PURE_PIXELS]}.")
-            
-            # If no clusters are large enough, burn the shelf and return
-            if num_valid_clusters == 0:
-                #print(f"Clusters found, but none met the minimum size threshold ({MIN_PURE_PIXELS} pixels). Burning shelf.")
-                return
-                
             # 2. Gather all samples that belong to ANY valid cluster
-            valid_cluster_tensor = torch.tensor(valid_cluster_ids, device=self.device)
-            pure_materials_mask = torch.isin(labels_tensor, valid_cluster_tensor)
+            # (Since we filtered out -1, all remaining unique_clusters are valid)
+            pure_materials_mask = torch.isin(labels_tensor, unique_clusters)
             X_all_valid = X_outliers[pure_materials_mask]
             
             global_q = self.MFA.q
@@ -164,7 +142,7 @@ class MFA_OTFP:
                 n_factors=global_q,
                 device=self.device
             )
-
+            
             cluster_model.fit(X_all_valid, n_init=5)
             
             # Re-assign the points to the newly fitted MFA components
