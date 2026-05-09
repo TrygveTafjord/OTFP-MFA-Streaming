@@ -106,10 +106,12 @@ class MFA_OTFP:
     def _birth_new_components(self, X_outliers):
             if self.L2_normalization:
                 metric = 'cosine'
+                dbscan_eps = 0.001
             else:
                 metric = 'euclidean'
+                dbscan_eps = 50.0
 
-            dbscan = DBSCAN(eps=0.001, min_samples=2*self.n_channels, metric=metric)
+            dbscan = DBSCAN(eps=dbscan_eps, min_samples=2*self.n_channels, metric=metric)
             labels = dbscan.fit_predict(X_outliers.cpu().numpy())
             labels_tensor = torch.tensor(labels, device=self.device)
             
@@ -123,16 +125,24 @@ class MFA_OTFP:
             # Find all unique clusters and their sizes
             valid_labels = labels_tensor[valid_mask]
             unique_clusters, cluster_counts = torch.unique(valid_labels, return_counts=True)
+
+            print(f"DBSCAN identified {len(unique_clusters)} cluster(s) on the shelf, with sizes: {[size.item() for size in cluster_counts]}.")
             
-            MIN_PURE_PIXELS = 2 * self.n_channels
+            MIN_PURE_PIXELS = self.n_channels
             
             # 1. Identify all clusters that meet the minimum size threshold
             valid_cluster_ids = []
+            num_burned_clusters = 0
             for cluster_idx, size in zip(unique_clusters, cluster_counts):
                 if size.item() >= MIN_PURE_PIXELS:
                     valid_cluster_ids.append(cluster_idx)
-                    
+                else: 
+                    num_burned_clusters += 1
+
             num_valid_clusters = len(valid_cluster_ids)
+
+            if num_burned_clusters > 0:
+                print(f"Identified {num_burned_clusters} cluster(s) on the shelf that were too small, with sizes: {[size.item() for size in cluster_counts if size.item() >= MIN_PURE_PIXELS]}.")
             
             # If no clusters are large enough, burn the shelf and return
             if num_valid_clusters == 0:
