@@ -2,6 +2,7 @@ from scipy.stats import chi2
 import torch
 from mfa import MFA
 from sklearn.cluster import DBSCAN
+from hdbscan import HDBSCAN
 
 class MFA_OTFP:
     def __init__(self, n_channels: int, device: str, outlier_update_treshold: int, L2_normalization: bool = True, q_max: int = 8):
@@ -52,7 +53,7 @@ class MFA_OTFP:
             min_mahalanobis = torch.full_like(torch.zeros(X.shape[0]), fill_value=(self.chi2_threshold + 1.0))  # Mark all as outliers if model isn't fitted yet
             assignments = torch.full_like(torch.zeros(X.shape[0], dtype=torch.long), fill_value=-1)  # No valid assignments
             log_resp_norm = None  # No responsibilities to return yet
-            assigned_mahalanobis = min_mahalanobis  
+            assigned_mahalanobis = min_mahalanobis  # Just return the outlier distances as is for now
             
         else: 
         
@@ -105,18 +106,18 @@ class MFA_OTFP:
     
 
     def _birth_new_components(self, X_outliers):
-            if self.L2_normalization:
-                metric = 'cosine'
-                dbscan_eps = 0.001
-            else:
-                metric = 'euclidean'
-                dbscan_eps = 50.0
 
-            dbscan = DBSCAN(eps=dbscan_eps, min_samples=2*self.n_channels, metric=metric)
-            labels = dbscan.fit_predict(X_outliers.cpu().numpy())
+            clusterer = HDBSCAN(
+                min_cluster_size=2 * self.n_channels, 
+                min_samples=self.n_channels,          
+                metric='euclidean',
+                core_dist_n_jobs=-1
+            )
+
+            labels = clusterer.fit_predict(X_outliers.cpu().numpy())
             labels_tensor = torch.tensor(labels, device=self.device)
             
-            # Filter out the pure noise (DBSCAN labels noise as -1)
+            # Filter out the pure noise (HDBSCAN labels noise as -1)
             valid_mask = labels_tensor >= 0
             
             if not valid_mask.any():
@@ -127,7 +128,7 @@ class MFA_OTFP:
             valid_labels = labels_tensor[valid_mask]
             unique_clusters, cluster_counts = torch.unique(valid_labels, return_counts=True)
 
-            print(f"DBSCAN identified {len(unique_clusters)} cluster(s) on the shelf, with sizes: {[size.item() for size in cluster_counts]}.")
+            print(f"HDBSCAN identified {len(unique_clusters)} cluster(s) on the shelf, with sizes: {[size.item() for size in cluster_counts]}.")
             
             MIN_PURE_PIXELS = self.n_channels
             
