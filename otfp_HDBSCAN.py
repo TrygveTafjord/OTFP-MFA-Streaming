@@ -111,7 +111,8 @@ class MFA_OTFP:
                 min_cluster_size=self.n_channels, 
                 min_samples=self.n_channels,          
                 metric='euclidean',
-                core_dist_n_jobs=-1
+                core_dist_n_jobs=-1,
+                allow_single_cluster=True
             )
 
             labels = clusterer.fit_predict(X_outliers.cpu().numpy())
