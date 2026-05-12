@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import math
 import copy
 
 
@@ -248,7 +247,7 @@ class MFA(nn.Module):
         Fully vectorized across all K components to eliminate Python loops.
         """
         N, D = X.shape
-        c = D * math.log(2 * math.pi)
+        c = D * torch.log(torch.tensor(2 * torch.pi)).item()
         
         # 1. Prepare component-specific variances
         psi = torch.exp(self.log_psi) + 1e-6            # (K, D)
@@ -294,7 +293,7 @@ class MFA(nn.Module):
         
         return log_probs, mahalanobis
         
-    def add_components(self, X_valid, assignments, total_samples_seen, new_mu, new_Lambda, new_log_psi):
+    def add_components(self, X_valid, log_resp, total_samples_seen, new_mu, new_Lambda, new_log_psi):
         """
         Dynamically adds multiple new components to the Mixture Model at once.
         Calculates sufficient statistics in a fully vectorized manner.
@@ -303,9 +302,8 @@ class MFA(nn.Module):
             K_new = new_mu.shape[0]
             q_new = new_Lambda.shape[2]
             
-            # Convert hard assignments (0, 1, ..., K_new-1) into a one-hot matrix (N, K_new)
-            resp = torch.nn.functional.one_hot(assignments, num_classes=K_new).float()
-            
+            resp = torch.exp(log_resp)
+
             # Compute exact starting statistics using the new specific parameters
             new_S0_sum, new_S1_sum, new_S_xx_sum, new_S_z_sum, new_S_xz_sum, new_S_zz_sum = self._calculate_sufficient_statistics(
                 X_valid, resp, mu=new_mu, Lambda=new_Lambda, log_psi=new_log_psi
@@ -406,7 +404,7 @@ class MFA(nn.Module):
                 V_q = Vh[:self.q, :].T  # (D, q)
                 
                 # Scale by standard deviation
-                self.Lambda.data[k] = V_q * (S_q / math.sqrt(Nk - 1)).unsqueeze(0)
+                self.Lambda.data[k] = V_q * (S_q / (Nk - 1)**0.5).unsqueeze(0)
                 
                 # Estimate specific variance (Psi) from residual reconstruction error
                 X_recon = X_k @ V_q @ V_q.T

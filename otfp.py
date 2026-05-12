@@ -147,13 +147,12 @@ class MFA_OTFP:
             
             # Re-assign the points to the newly fitted MFA components
             with torch.no_grad():
-                _, _, _, mahalanobis = cluster_model.e_step(X_all_valid)
-                new_assignments = mahalanobis.argmin(dim=1)
+                log_resp, _, _, _ = cluster_model.e_step(X_all_valid)
                 
                 # Only pass the components that actually have data assigned to them
                 self.MFA.add_components(
                     X_valid=X_all_valid,
-                    assignments=new_assignments, 
+                    log_resp=log_resp, 
                     total_samples_seen=self.n_samples_seen,
                     new_mu=cluster_model.mu.data,
                     new_Lambda=cluster_model.Lambda.data,
