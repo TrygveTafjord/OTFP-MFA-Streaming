@@ -74,7 +74,7 @@ n_batches = TOTAL_SAMPLES_TO_STREAM // PIXELS_PER_BATCH
 MFA_OTFP_model = MFA_OTFP(
     n_channels=num_bands,
     device="cpu", # Using CPU for fairer memory profiling (GPU memory is tracked differently)
-    outlier_update_treshold=1000,
+    outlier_update_treshold=100,
     q_max=5,
     L2_normalization=L2_NORMALIZATION
 )
@@ -194,7 +194,7 @@ ax2.xaxis.set_major_formatter(formatter)
 # FIX 3: Manually define the padding instead of using tight_layout()
 fig.subplots_adjust(hspace=0.2, top=0.92, bottom=0.1, left=0.08, right=0.95)
 
-plt.savefig("hardware_viability_benchmark.png", dpi=300) # Save high-res for thesis
+plt.savefig("figures/hardware_viability_benchmark.pdf", format="pdf", bbox_inches="tight")
 plt.show()
 
 print(f"Final number of components: {current_K}")
