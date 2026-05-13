@@ -4,7 +4,7 @@ from mfa import MFA
 from sklearn.cluster import DBSCAN
 
 class MFA_OTFP:
-    def __init__(self, n_channels: int, device: str, outlier_update_treshold: int, L2_normalization: bool = True, q_max: int = 8):
+    def __init__(self, n_channels: int, device: str, outlier_update_treshold: int, L2_normalization: bool = True, q_max: int = 5):
         # System hyperparameters
         self.device = device
         self.n_channels = n_channels
