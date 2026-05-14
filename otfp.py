@@ -106,12 +106,12 @@ class MFA_OTFP:
     def _birth_new_components(self, X_outliers):
             if self.L2_normalization:
                 metric = 'cosine'
-                dbscan_eps = 0.001
+                dbscan_eps = 0.0005 #classic value: 0.001  
             else:
                 metric = 'euclidean'
                 dbscan_eps = 50.0
 
-            dbscan = DBSCAN(eps=dbscan_eps, min_samples=self.n_channels, metric=metric)
+            dbscan = DBSCAN(eps=dbscan_eps, min_samples=self.n_channels//2, metric=metric)
             labels = dbscan.fit_predict(X_outliers.cpu().numpy())
             labels_tensor = torch.tensor(labels, device=self.device)
             

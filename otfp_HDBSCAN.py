@@ -1,7 +1,6 @@
 from scipy.stats import chi2
 import torch
 from mfa import MFA
-from sklearn.cluster import DBSCAN
 from hdbscan import HDBSCAN
 
 class MFA_OTFP:
@@ -108,7 +107,7 @@ class MFA_OTFP:
     def _birth_new_components(self, X_outliers):
 
             clusterer = HDBSCAN(
-                min_cluster_size=self.n_channels, 
+                min_cluster_size=self.n_channels//2, 
                 min_samples=self.n_channels,          
                 metric='euclidean',
                 core_dist_n_jobs=-1,
@@ -147,13 +146,12 @@ class MFA_OTFP:
             
             # Re-assign the points to the newly fitted MFA components
             with torch.no_grad():
-                _, _, _, mahalanobis = cluster_model.e_step(X_all_valid)
-                new_assignments = mahalanobis.argmin(dim=1)
+                log_resp, _, _, _ = cluster_model.e_step(X_all_valid)
                 
                 # Only pass the components that actually have data assigned to them
                 self.MFA.add_components(
                     X_valid=X_all_valid,
-                    assignments=new_assignments, 
+                    log_resp=log_resp, 
                     total_samples_seen=self.n_samples_seen,
                     new_mu=cluster_model.mu.data,
                     new_Lambda=cluster_model.Lambda.data,
