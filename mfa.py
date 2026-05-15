@@ -4,7 +4,7 @@ import copy
 
 
 class MFA(nn.Module):
-    def __init__(self, n_components, n_channels, n_factors, tol=1e-4, max_iter=150, device='cpu', alpha=0.6):
+    def __init__(self, n_components, n_channels, n_factors, tol=1e-4, max_iter=150, device='cpu', alpha=0.7):
         super().__init__()
         self.K = n_components
         self.D = n_channels
