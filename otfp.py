@@ -106,7 +106,7 @@ class MFA_OTFP:
     def _birth_new_components(self, X_outliers):
             if self.L2_normalization:
                 metric = 'cosine'
-                dbscan_eps = 0.0005 #classic value: 0.001  
+                dbscan_eps = 0.0005 #
             else:
                 metric = 'euclidean'
                 dbscan_eps = 50.0
