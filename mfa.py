@@ -98,16 +98,16 @@ class MFA(nn.Module):
           under each specific component j, log(P(x_i | w_j)). This is evaluated 
           using the local covariance structure Lambda_j Lambda_j' + Psi.
           
-        - mahalanobis_dists: (N, K) tensor. The squared Mahalanobis distance 
+        - mahalanobis_sq: (N, K) tensor. The squared Mahalanobis distance 
           between each data point x_i and each cluster mean mu_j, accounting 
           for the local dimensionality reduction metric.
         """
-        log_probs, mahalanobis_dists = self.compute_distances_and_log_probs(X)
+        log_probs, mahalanobis_sq = self.compute_distances_and_log_probs(X)
         log_resps = log_probs + self.log_pi.unsqueeze(0)
         log_likelihood = torch.logsumexp(log_resps, dim=1)
         log_resp_norm = log_resps - log_likelihood.unsqueeze(1)
         
-        return log_resp_norm, log_likelihood, log_probs, mahalanobis_dists
+        return log_resp_norm, log_likelihood, log_probs, mahalanobis_sq
 
     def m_step(self, X, resp):
         N, D = X.shape
@@ -288,10 +288,10 @@ class MFA(nn.Module):
         term2 = torch.sum(proj_invM * proj, dim=2)              # (N, K)
         
         # 7. Final outputs
-        mahalanobis = term1 - term2                                     # (N, K)
-        log_probs = -0.5 * (c + log_det_C.unsqueeze(0) + mahalanobis)   # (N, K)
+        mahalanobis_sq = term1 - term2                                     # (N, K)
+        log_probs = -0.5 * (c + log_det_C.unsqueeze(0) + mahalanobis_sq)   # (N, K)
         
-        return log_probs, mahalanobis
+        return log_probs, mahalanobis_sq
         
     def add_components(self, X_valid, log_resp, total_samples_seen, new_mu, new_Lambda, new_log_psi):
         """

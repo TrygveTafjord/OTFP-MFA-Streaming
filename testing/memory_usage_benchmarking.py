@@ -179,17 +179,9 @@ fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 9), sharex=True)
 ax1.plot(log_samples_seen, log_memory_mb, color='tab:blue', alpha=0.8, linewidth=1.5)
 ax1.set_ylabel("Memory Usage (MB)", fontsize=14, fontweight='bold')
 
-# Draw spawn lines and stagger text
+# Draw spawn lines (Removed the K=... text annotations)
 for i, (spawn_x, k_val) in enumerate(spawn_events):
     ax1.axvline(x=spawn_x, color='red', linestyle='--', alpha=0.6)
-    
-    # FIX 2: Alternate the vertical position of the text so it doesn't overlap
-    if i % 2 == 0:
-        y_pos = max(log_memory_mb) * 0.95
-    else:
-        y_pos = max(log_memory_mb) * 0.85
-        
-    ax1.text(spawn_x, y_pos, f'K={k_val}', color='red', fontsize=10, rotation=90, va='top', ha='right')
 
 # Add Legend to Plot 1
 legend_elements_ax1 = [

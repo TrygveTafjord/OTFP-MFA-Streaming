@@ -49,22 +49,22 @@ class MFA_OTFP:
         self.n_samples_seen += X.shape[0]
 
         if not self.MFA_fitted:
-            min_mahalanobis = torch.full_like(torch.zeros(X.shape[0]), fill_value=(self.chi2_threshold + 1.0))  # Mark all as outliers if model isn't fitted yet
+            min_mahalanobis_sq = torch.full_like(torch.zeros(X.shape[0]), fill_value=(self.chi2_threshold + 1.0))  # Mark all as outliers if model isn't fitted yet
             assignments = torch.full_like(torch.zeros(X.shape[0], dtype=torch.long), fill_value=-1)  # No valid assignments
             log_resp_norm = None  # No responsibilities to return yet
-            assigned_mahalanobis = min_mahalanobis  
+            assigned_mahalanobis = min_mahalanobis_sq  
             
         else: 
         
             with torch.no_grad():
                 # Unpack log_resp_norm to find the most probable component (MAP assignment)
-                log_resp_norm, _, _, mahalanobis_dists = self.MFA.e_step(X)
+                log_resp_norm, _, _, mahalanobis_sq = self.MFA.e_step(X)
 
             assignments = torch.argmax(log_resp_norm, dim=1)
-            assigned_mahalanobis = mahalanobis_dists.gather(1, assignments.unsqueeze(1)).squeeze(1)
-            min_mahalanobis, _ = torch.min(mahalanobis_dists, dim=1)
+            assigned_mahalanobis = mahalanobis_sq.gather(1, assignments.unsqueeze(1)).squeeze(1)
+            min_mahalanobis_sq, _ = torch.min(mahalanobis_sq, dim=1)
 
-        outlier_mask = min_mahalanobis > self.chi2_threshold
+        outlier_mask = min_mahalanobis_sq > self.chi2_threshold
         assignments[outlier_mask] = -1  # Mark outliers with a special assignment value (e.g., -1)
         inlier_mask = ~outlier_mask
         num_new_outliers = outlier_mask.sum().item()
