@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
 from tqdm import tqdm
 import sys
+from matplotlib.lines import Line2D
 
 # Make sure these imports work in your local environment
 # 1. Get the absolute path of the parent directory (OTFP-MFA-Streaming)
@@ -60,12 +61,12 @@ except Exception as e:
 h, w, num_bands = img_full.shape
 pixels_per_row = w
 
-BATCH_ROWS = 5 
+BATCH_ROWS = 1 
 PIXELS_PER_BATCH = BATCH_ROWS * pixels_per_row
 N_TRAIN_ROWS = 20
 L2_NORMALIZATION = True
 
-TOTAL_SAMPLES_TO_STREAM = 100_000_000  
+TOTAL_SAMPLES_TO_STREAM = 50_000_000  
 NEW_SIGNAL_INTERVAL = 2_500_000       # Inject a new material every 2M pixels
 n_batches = TOTAL_SAMPLES_TO_STREAM // PIXELS_PER_BATCH
 
@@ -75,7 +76,7 @@ MFA_OTFP_model = MFA_OTFP(
     n_channels=num_bands,
     device="cpu", # Using CPU for fairer memory profiling (GPU memory is tracked differently)
     outlier_update_treshold=100,
-    q_max=5,
+    q_max=4,
     L2_normalization=L2_NORMALIZATION
 )
 
@@ -98,6 +99,14 @@ samples_seen = 0
 next_signal_threshold = NEW_SIGNAL_INTERVAL
 anomaly_counter = 0
 
+# Metrics to log
+log_samples_seen = []
+log_memory_mb = []
+log_latency_ms = []
+update_latencies = []    # ADD THIS
+no_update_latencies = [] # ADD THIS
+spawn_events = [] # Stores tuples of (samples_seen, current_K)
+
 # 4. STREAMING LOOP
 print(f"Starting stream for {n_batches} batches ({TOTAL_SAMPLES_TO_STREAM} pixels)...")
 
@@ -115,19 +124,19 @@ for batch_idx in tqdm(range(n_batches), desc="Processing Stream"):
     INJECT_SIGNAL = True
     if samples_seen >= next_signal_threshold and INJECT_SIGNAL:
         # 1. Generate a mathematically unique shape using increasing sine wave frequencies
-        # Different frequencies ensure the shapes remain orthogonal after L2 normalization.
         x = np.linspace(0, 10, num_bands)
         freq = 1.0 + (anomaly_counter * 0.7) 
         base_signature = np.sin(x * freq) * 50 + 100 
         
-        # 2. Create a dense cluster of 1500 pixels around this signature
-        # We inject a small variance (sigma=2.0) so the MFA has a 3D volume to fit 
-        # its latent factors (Lambda) and noise (Psi) to. 
-        intra_class_variance = np.random.normal(0, 2.0, (1500, num_bands))
+        # 2. Determine a safe injection size (cap at 1500 or the max batch size)
+        injection_size = min(1500, batch_data.shape[0])
+        
+        # 3. Create a dense cluster around this signature
+        intra_class_variance = np.random.normal(0, 2.0, (injection_size, num_bands))
         novel_cluster = base_signature + intra_class_variance
         
-        # 3. Inject it into the batch
-        batch_data[0:1500, :] = novel_cluster
+        # 4. Inject it into the batch
+        batch_data[0:injection_size, :] = novel_cluster
         
         next_signal_threshold += NEW_SIGNAL_INTERVAL
         anomaly_counter += 1
@@ -135,23 +144,28 @@ for batch_idx in tqdm(range(n_batches), desc="Processing Stream"):
     batch_tensor = torch.from_numpy(batch_data).float()
     
     t0 = time.perf_counter()
-    MFA_OTFP_model.process_data_block(batch_tensor) # Assuming this is your streaming function
+    MFA_OTFP_model.process_data_block(batch_tensor) 
     t1 = time.perf_counter()
+    
+    latency_ms = (t1 - t0) * 1000 # Calculate it once here
     
     # 4. Measure Memory
     mem_mb = process.memory_info().rss / (1024 * 1024)
     
-    # 5. Check for Component Spawns
+    # 5. Check for Component Spawns & Log specific latency
     new_K = MFA_OTFP_model.MFA.K
     if new_K > current_K:
         spawn_events.append((samples_seen, new_K))
         current_K = new_K
+        update_latencies.append(latency_ms) # Save to 'update' list
+    else:
+        no_update_latencies.append(latency_ms) # Save to 'no update' list
         
     # 6. Log metrics
     samples_seen += PIXELS_PER_BATCH
     log_samples_seen.append(samples_seen)
     log_memory_mb.append(mem_mb)
-    log_latency_ms.append((t1 - t0) * 1000) # Convert to milliseconds
+    log_latency_ms.append(latency_ms)
 
 # 5. PLOTTING
 print("Stream finished. Generating plots...")
@@ -163,8 +177,7 @@ fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 9), sharex=True)
 
 # --- Plot 1: Memory Footprint ---
 ax1.plot(log_samples_seen, log_memory_mb, color='tab:blue', alpha=0.8, linewidth=1.5)
-ax1.set_ylabel("Memory Usage (MB)", fontsize=12, fontweight='bold')
-ax1.set_title("OAMFA Hardware Viability: Memory & Latency over Infinite Stream", fontsize=14, fontweight='bold')
+ax1.set_ylabel("Memory Usage (MB)", fontsize=14, fontweight='bold')
 
 # Draw spawn lines and stagger text
 for i, (spawn_x, k_val) in enumerate(spawn_events):
@@ -178,14 +191,28 @@ for i, (spawn_x, k_val) in enumerate(spawn_events):
         
     ax1.text(spawn_x, y_pos, f'K={k_val}', color='red', fontsize=10, rotation=90, va='top', ha='right')
 
+# Add Legend to Plot 1
+legend_elements_ax1 = [
+    Line2D([0], [0], color='tab:blue', linewidth=1.5, label='Memory Usage'),
+    Line2D([0], [0], color='red', linestyle='--', alpha=0.6, linewidth=1.5, label='Component Spawn')
+]
+ax1.legend(handles=legend_elements_ax1, loc="upper left", fontsize=12)
+
 # --- Plot 2: Processing Latency ---
-ax2.plot(log_samples_seen, log_latency_ms, color='tab:orange', alpha=0.6, linewidth=1.0)
-ax2.set_ylabel("Latency per Batch (ms)", fontsize=12, fontweight='bold')
-ax2.set_xlabel("Number of Pixels Processed", fontsize=12, fontweight='bold')
+ax2.plot(log_samples_seen, log_latency_ms, color='tab:orange', alpha=0.6, linewidth=1.5)
+ax2.set_ylabel("Latency per Batch (ms)", fontsize=14, fontweight='bold')
+ax2.set_xlabel("Number of Pixels Processed", fontsize=14, fontweight='bold')
 
 # Draw spawn lines on the second plot too
 for (spawn_x, k_val) in spawn_events:
     ax2.axvline(x=spawn_x, color='red', linestyle='--', alpha=0.6)
+
+# Add Legend to Plot 2
+legend_elements_ax2 = [
+    Line2D([0], [0], color='tab:orange', linewidth=1.5, label='Processing Latency'),
+    Line2D([0], [0], color='red', linestyle='--', alpha=0.6, linewidth=1.0, label='Component Spawn')
+]
+ax2.legend(handles=legend_elements_ax2, loc="upper left", fontsize=12)
 
 # Format X-axis to show millions (M)
 formatter = FuncFormatter(lambda x, pos: f'{x*1e-6:.1f}M')
@@ -194,7 +221,24 @@ ax2.xaxis.set_major_formatter(formatter)
 # FIX 3: Manually define the padding instead of using tight_layout()
 fig.subplots_adjust(hspace=0.2, top=0.92, bottom=0.1, left=0.08, right=0.95)
 
-plt.savefig("figures/hardware_viability_benchmark.pdf", format="pdf", bbox_inches="tight")
+# ADD THIS LINE: Ensure the directory exists before saving
+os.makedirs("testing/figures", exist_ok=True) 
+
+plt.savefig("testing/figures/hardware_viability_benchmark.pdf", format="pdf", bbox_inches="tight")
 plt.show()
 
 print(f"Final number of components: {current_K}")
+# --- PRINT LATENCY STATISTICS ---
+max_no_update = max(no_update_latencies) if no_update_latencies else 0
+max_overall = max(log_latency_ms) if log_latency_ms else 0
+avg_no_update = sum(no_update_latencies) / len(no_update_latencies) if no_update_latencies else 0
+avg_update = sum(update_latencies) / len(update_latencies) if update_latencies else 0
+
+print("\n" + "="*40)
+print("LATENCY STATISTICS")
+print("="*40)
+print(f"Max latency (no model updates):    {max_no_update:.2f} ms")
+print(f"Max latency (overall):             {max_overall:.2f} ms")
+print(f"Avg latency (no model updates):    {avg_no_update:.2f} ms")
+print(f"Avg latency (with model updates):  {avg_update:.2f} ms")
+print("="*40 + "\n")
