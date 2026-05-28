@@ -194,9 +194,9 @@ class MFA(nn.Module):
             if (s0_batch[k] * N) < (self.D / 2):
                 continue
 
-            # --- Interpolate Global Sufficient Statistics ---
+            # Interpolate Global Sufficient Statistics 
             k_count = self.update_counts[k].item()
-            eta = (k_count + 2) ** (-self.alpha)                                # (q, q)
+            eta = (k_count + 2) ** (-self.alpha)       
 
             if k_count == 0:
                 self.S0[k] = s0_batch[k]
@@ -215,8 +215,8 @@ class MFA(nn.Module):
 
             self.update_counts[k] += 1
 
-            # --- M-STEP: Recover Parameters ---
-            self.log_pi.data = torch.log(self.S0 / self.S0.sum() + 1e-10)
+            # M-STEP: Recover Parameters from Sufficient Statistics
+            #self.log_pi.data = torch.log(self.S0 / self.S0.sum() + 1e-10)
 
             mu_k_new = self.S1[k] / (self.S0[k] + 1e-10)
             self.mu.data[k] = mu_k_new
@@ -239,6 +239,8 @@ class MFA(nn.Module):
 
             # You can keep the clamp as an absolute fail-safe
             self.log_psi.data[k] = torch.log(torch.clamp(psi_update, min=1e-6))
+            
+        self.log_pi.data = torch.log(self.S0 / self.S0.sum() + 1e-10)
     
     def compute_distances_and_log_probs(self, X):
         """

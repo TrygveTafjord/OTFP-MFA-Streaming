@@ -173,11 +173,11 @@ print("Stream finished. Generating plots...")
 plt.style.use('seaborn-v0_8-whitegrid') # Clean academic style
 
 # FIX 1: Make the figure wider (14x9 instead of 10x8)
-fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 9), sharex=True)
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 9), sharex=True, gridspec_kw={'height_ratios': [1.4, 1]}) # Make the memory plot taller than latency
 
 # --- Plot 1: Memory Footprint ---
 ax1.plot(log_samples_seen, log_memory_mb, color='tab:blue', alpha=0.8, linewidth=1.5)
-ax1.set_ylabel("Memory Usage (MB)", fontsize=14, fontweight='bold')
+ax1.set_ylabel("Memory Usage (MB)", fontsize=16, fontweight='bold')
 
 # Draw spawn lines (Removed the K=... text annotations)
 for i, (spawn_x, k_val) in enumerate(spawn_events):
@@ -192,8 +192,8 @@ ax1.legend(handles=legend_elements_ax1, loc="upper left", fontsize=12)
 
 # --- Plot 2: Processing Latency ---
 ax2.plot(log_samples_seen, log_latency_ms, color='tab:orange', alpha=0.6, linewidth=1.5)
-ax2.set_ylabel("Latency per Batch (ms)", fontsize=14, fontweight='bold')
-ax2.set_xlabel("Number of Pixels Processed", fontsize=14, fontweight='bold')
+ax2.set_ylabel("Latency per Batch (ms)", fontsize=16, fontweight='bold')
+ax2.set_xlabel("Number of Pixels Processed", fontsize=16, fontweight='bold')
 
 # Draw spawn lines on the second plot too
 for (spawn_x, k_val) in spawn_events:

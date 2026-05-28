@@ -109,7 +109,7 @@ class MFA_OTFP:
                 dbscan_eps = 0.0005 #
             else:
                 metric = 'euclidean'
-                dbscan_eps = 50.0
+                dbscan_eps = 60.0
 
             dbscan = DBSCAN(eps=dbscan_eps, min_samples=self.n_channels//2, metric=metric)
             labels = dbscan.fit_predict(X_outliers.cpu().numpy())
