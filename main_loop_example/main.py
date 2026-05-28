@@ -3,7 +3,7 @@ import time
 import torch
 import os
 from multiprocessing import Queue, Process
-from main_loop.data_fetcher import producer, DataProduct
+from data_fetcher import producer, DataProduct
 import sys
 
 current_dir = os.path.dirname(os.path.abspath(__file__))

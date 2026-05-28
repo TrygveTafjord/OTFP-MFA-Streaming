@@ -1,7 +1,6 @@
 from hypso import Hypso
 import numpy as np
 from enum import Enum
-import torch
 from multiprocessing import Queue
 
 
