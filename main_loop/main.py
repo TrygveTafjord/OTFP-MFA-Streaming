@@ -3,8 +3,16 @@ import time
 import torch
 import os
 from multiprocessing import Queue, Process
-from data_fetcher import producer, DataProduct
+from main_loop.data_fetcher import producer, DataProduct
+import sys
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.insert(0, parent_dir)
+
 from otfp import MFA_OTFP
+
+
 
 PERFORM_TIMING = True
 
