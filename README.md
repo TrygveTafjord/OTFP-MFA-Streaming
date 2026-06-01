@@ -4,12 +4,6 @@ This repository contains the core implementation and experimental notebooks for 
 
 ## System Architecture
 
-*(Placeholder for System Diagram)*
-<br>
-![System Diagram](testing\figures\OTFP-diagram.pdf)
-<br>
-*(Note: Browsers and GitHub natively support image formats like PNG/JPEG better in markdown. If possible, consider exporting your PDF to a PNG and updating this path.)*
-
 ## Repository Structure
 
 ### Core Implementations
