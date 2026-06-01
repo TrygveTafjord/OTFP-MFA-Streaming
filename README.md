@@ -3,6 +3,7 @@
 This repository contains the core implementation and experimental notebooks for an On-The-Fly Processing (OTFP) system utilizing a streaming Mixture of Factor Analyzers (MFA) algorithm. The system is designed for streaming, clustering, and performing dimensionality reduction on hyperspectral imaging (HSI) data. 
 
 ## System Architecture
+<img width="678" height="316" alt="image" src="https://github.com/user-attachments/assets/d3d4b01c-140f-4d7a-bc34-d233c69f4e38" />
 
 ## Repository Structure
 
