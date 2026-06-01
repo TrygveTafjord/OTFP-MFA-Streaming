@@ -104,6 +104,7 @@ class MFA_OTFP:
     
 
     def _birth_new_components(self, X_outliers):
+            # Limits are different based on the distance metric used in DBSCAN, so we need to set them separately
             if self.L2_normalization:
                 metric = 'cosine'
                 dbscan_eps = 0.0005 #

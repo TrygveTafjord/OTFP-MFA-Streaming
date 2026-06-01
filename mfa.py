@@ -89,7 +89,6 @@ class MFA(nn.Module):
         - log_likelihood: (N) tensor. The total log marginal likelihood of 
         - log_probs: (N, K) tensor. The conditional log-likelihood of the data 
         - mahalanobis_sq: (N, K) tensor. The squared Mahalanobis distance 
-
         """
         log_probs, mahalanobis_sq = self.compute_distances_and_log_probs(X)
         log_resps = log_probs + self.log_pi.unsqueeze(0)
