@@ -185,21 +185,13 @@ class MFA(nn.Module):
             # Interpolate Global Sufficient Statistics 
             k_count = self.update_counts[k].item()
             eta = (k_count + 2) ** (-self.alpha)       
-
-            if k_count == 0:
-                self.S0[k] = s0_batch[k]
-                self.S1[k] = s1_batch[k]
-                self.S_xx[k] = s_xx_batch[k]
-                self.S_z[k] = sz_batch[k]      # Added [k] here
-                self.S_xz[k] = sxz_batch[k]    # Added [k] here
-                self.S_zz[k] = szz_batch[k]    # Added [k] here
-            else:
-                self.S0[k] = (1 - eta) * self.S0[k] + eta * s0_batch[k]
-                self.S1[k] = (1 - eta) * self.S1[k] + eta * s1_batch[k]
-                self.S_xx[k] = (1 - eta) * self.S_xx[k] + eta * s_xx_batch[k]
-                self.S_z[k] = (1 - eta) * self.S_z[k] + eta * sz_batch[k]      # Added [k] here
-                self.S_xz[k] = (1 - eta) * self.S_xz[k] + eta * sxz_batch[k]    # Added [k] here
-                self.S_zz[k] = (1 - eta) * self.S_zz[k] + eta * szz_batch[k]    # Added [k] here
+            
+            self.S0[k] = (1 - eta) * self.S0[k] + eta * s0_batch[k]
+            self.S1[k] = (1 - eta) * self.S1[k] + eta * s1_batch[k]
+            self.S_xx[k] = (1 - eta) * self.S_xx[k] + eta * s_xx_batch[k]
+            self.S_z[k] = (1 - eta) * self.S_z[k] + eta * sz_batch[k]      # Added [k] here
+            self.S_xz[k] = (1 - eta) * self.S_xz[k] + eta * sxz_batch[k]    # Added [k] here
+            self.S_zz[k] = (1 - eta) * self.S_zz[k] + eta * szz_batch[k]    # Added [k] here
 
             self.update_counts[k] += 1
 
@@ -346,7 +338,6 @@ class MFA(nn.Module):
             self.log_pi = nn.Parameter(torch.log(self.S0 / self.S0.sum() + 1e-10))
 
             self.K += K_new
-            print(f"Model successfully updated! Added {K_new} components. Total (K) is now {self.K}")
 
 
     def _initialize_parameters(self, X):
