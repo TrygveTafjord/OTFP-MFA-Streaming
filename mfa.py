@@ -323,22 +323,6 @@ class MFA(nn.Module):
             new_S_xz = new_S_xz_sum / N
             new_S_zz = new_S_zz_sum / N                     # (K_new, q_new, q_new)
 
-            # 2. Handle Tensor Shape Matching (Padding)
-            if q_new < self.q:
-                pad_size = self.q - q_new
-                new_Lambda = torch.nn.functional.pad(new_Lambda, (0, pad_size))
-                new_S_z = torch.nn.functional.pad(new_S_z, (0, pad_size))
-                new_S_xz = torch.nn.functional.pad(new_S_xz, (0, pad_size))
-                new_S_zz = torch.nn.functional.pad(new_S_zz, (0, pad_size, 0, pad_size))
-                
-            elif q_new > self.q:
-                pad_size = q_new - self.q
-                self.Lambda.data = torch.nn.functional.pad(self.Lambda.data, (0, pad_size))
-                self.S_z = torch.nn.functional.pad(self.S_z, (0, pad_size))
-                self.S_xz = torch.nn.functional.pad(self.S_xz, (0, pad_size))
-                self.S_zz = torch.nn.functional.pad(self.S_zz, (0, pad_size, 0, pad_size))
-                self.q = q_new
-
             # 3. Concatenate Parameters
             self.mu = nn.Parameter(torch.cat([self.mu.data, new_mu], dim=0))
             self.Lambda = nn.Parameter(torch.cat([self.Lambda.data, new_Lambda], dim=0))
