@@ -107,7 +107,7 @@ class MFA_OTFP:
             # Limits are different based on the distance metric used in DBSCAN, so we need to set them separately
             if self.L2_normalization:
                 metric = 'cosine'
-                dbscan_eps = 0.0005 #
+                dbscan_eps = 0.00055 #
             else:
                 metric = 'euclidean'
                 dbscan_eps = 60.0
@@ -154,7 +154,6 @@ class MFA_OTFP:
                 self.MFA.add_components(
                     X_valid=X_all_valid,
                     log_resp=log_resp, 
-                    total_samples_seen=self.n_samples_seen,
                     new_mu=cluster_model.mu.data,
                     new_Lambda=cluster_model.Lambda.data,
                     new_log_psi=cluster_model.log_psi.data

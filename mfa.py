@@ -32,6 +32,7 @@ class MFA(nn.Module):
         self.register_buffer('S_zz', torch.zeros(self.K, self.q, self.q, device=self.device))
 
         self.register_buffer('update_counts', torch.zeros(self.K, device=self.device))
+        self.register_buffer('absolute_mass', torch.zeros(self.K, device=self.device))
         
     def fit(self, X, n_init=5):
         """
@@ -78,7 +79,23 @@ class MFA(nn.Module):
             with torch.no_grad():
                 log_resp_norm, _, _, _ = self.e_step(X)
                 resp = torch.exp(log_resp_norm)
-                self.S0, self.S1, self.S_xx, self.S_z, self.S_xz, self.S_zz = self._calculate_sufficient_statistics(X, resp)
+                
+                # 1. Get the RAW sums
+                S0_sum, S1_sum, S_xx_sum, S_z_sum, S_xz_sum, S_zz_sum = self._calculate_sufficient_statistics(X, resp)
+                
+                # 2. Seed the absolute mass history! 
+                self.absolute_mass = S0_sum.clone()
+                
+                # 3. Scale the geometric sufficient statistics
+                self.S0 = S0_sum / N
+                self.S1 = S1_sum / N
+                self.S_xx = S_xx_sum / N
+                self.S_z = S_z_sum / N
+                self.S_xz = S_xz_sum / N
+                self.S_zz = S_zz_sum / N
+
+                # Seed updatecouts so the first online batch doesn't completely overwrite the initial fit
+                self.update_counts = torch.ones(self.K, device=self.device)
                     
         
     def e_step(self, X):
@@ -171,6 +188,8 @@ class MFA(nn.Module):
         s0_sum, s1_sum, s_xx_sum, sz_sum, sxz_sum, szz_sum = self._calculate_sufficient_statistics(X, resp)
 
         # 1. Batch Responsibilities (Scale by N for the moving average)
+        self.absolute_mass += s0_sum
+
         s0_batch = s0_sum / N                                      # (K,)
         s1_batch = s1_sum / N                                      # (K, D)
         s_xx_batch = s_xx_sum / N                                  # (K, D)
@@ -220,7 +239,7 @@ class MFA(nn.Module):
             # You can keep the clamp as an absolute fail-safe
             self.log_psi.data[k] = torch.log(torch.clamp(psi_update, min=1e-6))
             
-        self.log_pi.data = torch.log(self.S0 / self.S0.sum() + 1e-10)
+        self.log_pi.data = torch.log(self.absolute_mass / self.absolute_mass.sum() + 1e-10)
     
     def compute_distances_and_log_probs(self, X):
         """
@@ -275,7 +294,7 @@ class MFA(nn.Module):
         
         return log_probs, mahalanobis_sq
         
-    def add_components(self, X_valid, log_resp, total_samples_seen, new_mu, new_Lambda, new_log_psi):
+    def add_components(self, X_valid, log_resp, new_mu, new_Lambda, new_log_psi):
         """
         Dynamically adds multiple new components to the Mixture Model at once.
         Calculates sufficient statistics in a fully vectorized manner.
@@ -290,16 +309,19 @@ class MFA(nn.Module):
             new_S0_sum, new_S1_sum, new_S_xx_sum, new_S_z_sum, new_S_xz_sum, new_S_zz_sum = self._calculate_sufficient_statistics(
                 X_valid, resp, mu=new_mu, Lambda=new_Lambda, log_psi=new_log_psi
             )
+
+            new_absolute_mass = new_S0_sum # The raw sum of responsibilities from X_valid
+            self.absolute_mass = torch.cat([self.absolute_mass, new_absolute_mass])
             
-            scaling_factor = max(total_samples_seen, 1)
+            N = X_valid.shape[0]
             
             # Scale exactly as done previously for streaming initialization
-            new_S0 = new_S0_sum / scaling_factor
-            new_S1 = new_S1_sum / scaling_factor
-            new_S_xx = new_S_xx_sum / scaling_factor
-            new_S_z = new_S_z_sum / scaling_factor
-            new_S_xz = new_S_xz_sum / scaling_factor
-            new_S_zz = new_S_zz_sum / scaling_factor                     # (K_new, q_new, q_new)
+            new_S0 = new_S0_sum / N
+            new_S1 = new_S1_sum / N
+            new_S_xx = new_S_xx_sum / N
+            new_S_z = new_S_z_sum / N
+            new_S_xz = new_S_xz_sum / N
+            new_S_zz = new_S_zz_sum / N                     # (K_new, q_new, q_new)
 
             # 2. Handle Tensor Shape Matching (Padding)
             if q_new < self.q:
@@ -335,7 +357,8 @@ class MFA(nn.Module):
             self.update_counts = torch.cat([self.update_counts, new_counts])
 
             # 5. Automatically update global mixing weights (log_pi)
-            self.log_pi = nn.Parameter(torch.log(self.S0 / self.S0.sum() + 1e-10))
+            self.log_pi = nn.Parameter(torch.log(self.absolute_mass / self.absolute_mass.sum() + 1e-10))
+            
 
             self.K += K_new
 
